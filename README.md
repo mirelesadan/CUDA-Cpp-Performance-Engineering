@@ -1,0 +1,102 @@
+# CUDA C++ Performance Engineering Portfolio
+
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, optimized reprofiling, and portable OpenMP scaling.
+
+CUDA C++, GPU profiling, Python bindings, the adaptive native implementation, and Projects 2–4 are roadmap work—not completed features.
+
+## Current status
+
+| Stage | Status | Evidence |
+| --- | --- | --- |
+| Python/4Denoise behavioral reference | Complete | Fixed and adaptive contracts documented in output-cleared notebooks |
+| Correctness-first C++17 fixed median | Complete | Exact finite-`float64` semantics and bitwise validation |
+| CPU profiling and serial optimization | Complete | Median-of-nine and direct-address experiments measured independently |
+| Portable multicore CPU | Complete | OpenMP implementation with static coarse-grained decomposition |
+| CUDA C++ and GPU optimization | **Next / planned** | No CUDA source or CUDA benchmark claim yet |
+| Python interface | Planned | No binding implemented yet |
+| Projects 2–4 | Planned | Problem statements and validation/performance questions only |
+
+## Project 1 Phase A results
+
+The canonical workload contains 47,228,125 outputs with shape `(85, 35, 127, 125)`. All reported measurements below came from one Windows 11 laptop with an Intel Core i7-13700H (14 physical cores, 20 logical processors), MSVC x64 Release `/O2`, and internal output allocation included. They are machine-specific results, not universal performance claims.
+
+- The original correctness-first C++ median was 3.756627 s.
+- Sampling identified general-purpose `std::nth_element` as the dominant original hotspot.
+- A fixed 19-comparator median-of-nine network produced a measured `1.135×` speedup against its fresh same-session baseline.
+- Direct reusable C-order addressing produced another measured `1.105×` speedup against its fresh median-of-nine baseline.
+- Reprofiling found selection still dominant at approximately 70% of relevant samples.
+- Static OpenMP decomposition reached 319.583 ms at 20 threads: `8.729×` versus the fresh 2.789567 s optimized-serial baseline and 147.781 million outputs/s.
+
+The optimized candidates matched the established Python and preceding C++ outputs bit for bit. Raw runs, benchmark boundaries, full scaling data, profiling caveats, and implementation progression are in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
+
+## Engineering progression
+
+```text
+Python reference
+  → correctness-first C++17
+  → profiled and optimized serial C++
+  → portable OpenMP multicore CPU
+  → CUDA C++                    [next]
+  → CUDA profiling/optimization [planned]
+  → Python interface            [planned]
+```
+
+The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
+
+## Repository structure
+
+```text
+01_4DSTEM_Median_Filter_Acceleration/
+    cpp/                         C++17 serial/OpenMP source and CMake build
+    reference_data/public_synthetic/
+                                 public deterministic correctness fixture
+    benchmark_data/              instructions for local compatible inputs
+    benchmarks/                  Python/4Denoise benchmark harness
+    *.ipynb                      output-cleared scientific reference notebooks
+02_4DSTEM_3D_Median_Filter/      planned
+03_CUDA_KMeans/                  planned
+04_CUDA_Matrix_Multiplication/   planned
+ROADMAP.md                       staged development plan and completion state
+```
+
+## Build and validate the public fixture
+
+Requirements are CMake 3.24+, a C++17 compiler, and a compiler-supported OpenMP runtime.
+
+Windows with Visual Studio 2022:
+
+```bat
+cmake -S 01_4DSTEM_Median_Filter_Acceleration/cpp -B 01_4DSTEM_Median_Filter_Acceleration/cpp/build -G "Visual Studio 17 2022" -A x64
+cmake --build 01_4DSTEM_Median_Filter_Acceleration/cpp/build --config Release
+01_4DSTEM_Median_Filter_Acceleration\cpp\build\Release\phase_a_fixed_median.exe
+```
+
+Linux with GCC or Clang and an installed OpenMP runtime:
+
+```bash
+cmake -S 01_4DSTEM_Median_Filter_Acceleration/cpp -B 01_4DSTEM_Median_Filter_Acceleration/cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build 01_4DSTEM_Median_Filter_Acceleration/cpp/build
+./01_4DSTEM_Median_Filter_Acceleration/cpp/build/phase_a_fixed_median
+```
+
+The default executable validates both optimized serial and OpenMP output against a small deterministic synthetic fixture. Linux compilation and scaling are intended portability targets but have not yet been verified on the planned Lambda environment.
+
+## Benchmark with a local input
+
+Experimental arrays are intentionally not distributed. The benchmark accepts another little-endian `float64`, C-contiguous, nonempty four-dimensional NumPy array with axis order `(scan_y, scan_x, detector_y, detector_x)`:
+
+```text
+phase_a_baseline_benchmark <compatible-input.npy> --threads 1,2,4,8
+```
+
+Use thread counts supported by the current machine. The program performs a full serial-versus-OpenMP bitwise comparison before timing, then runs one warm-up and three filter-only trials per configuration. See [benchmark data guidance](01_4DSTEM_Median_Filter_Acceleration/benchmark_data/README.md).
+
+## Data and reproducibility boundary
+
+The upstream experimental array, prepared canonical benchmark input, and experimental correctness slices remain local and are ignored by Git because redistribution rights are not established. The committed synthetic fixture verifies executable behavior but does not reproduce the documented experimental benchmark. Notebook outputs were cleared before publication to avoid embedding local paths or experimental renderings; their source cells document the reference methodology and require separately obtained 4Denoise software and local data to rerun.
+
+## Development disclosure
+
+AI coding agents were used as development tools. I remained responsible for problem specification, scientific and numerical contracts, algorithm and optimization decisions, code review, debugging, correctness validation, benchmark design, and performance interpretation. This repository does not claim that every generated line was manually authored.
+
+See [ROADMAP.md](ROADMAP.md) for completed and planned milestones and [LEARNING_NOTES.md](LEARNING_NOTES.md) for the evolving technical study outline.

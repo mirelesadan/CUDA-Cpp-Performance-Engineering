@@ -1,0 +1,60 @@
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+
+# Operating-system and IDE metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Python and notebook state
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.venv/
+venv/
+
+# CMake and compiler output
+**/build/
+**/out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.cmake.user
+*.exe
+*.dll
+*.lib
+*.exp
+*.obj
+*.pdb
+*.ilk
+*.ipch
+
+# Profiling, logs, and temporary artifacts
+*.etl
+*.vspx
+*.diagsession
+*.trace
+*.log
+*.tmp
+*.temp
+
+# Local machine audit (contains installation-specific paths)
+DEVELOPMENT_ENVIRONMENT.md
+
+# Scientific arrays are local unless explicitly allow-listed below.
+*.npy
+*.npz
+01_4DSTEM_Median_Filter_Acceleration/benchmark_data/*
+!01_4DSTEM_Median_Filter_Acceleration/benchmark_data/README.md
+01_4DSTEM_Median_Filter_Acceleration/reference_data/*
+!01_4DSTEM_Median_Filter_Acceleration/reference_data/public_synthetic/
+!01_4DSTEM_Median_Filter_Acceleration/reference_data/public_synthetic/**
