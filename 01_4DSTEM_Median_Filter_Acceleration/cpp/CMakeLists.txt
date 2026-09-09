@@ -94,6 +94,7 @@ set(PHASE_A_CUDA_ARCHITECTURES "89" CACHE STRING
 if(PHASE_A_ENABLE_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
+    find_package(Threads REQUIRED)
 
     add_library(phase_a_cuda_baseline STATIC
         src/fixed_median_cuda.cu
@@ -102,7 +103,7 @@ if(PHASE_A_ENABLE_CUDA)
         PUBLIC
             "${CMAKE_CURRENT_SOURCE_DIR}/include"
     )
-    target_link_libraries(phase_a_cuda_baseline PUBLIC CUDA::cudart)
+    target_link_libraries(phase_a_cuda_baseline PUBLIC CUDA::cudart Threads::Threads)
     set_target_properties(phase_a_cuda_baseline PROPERTIES
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED YES
@@ -118,8 +119,15 @@ if(PHASE_A_ENABLE_CUDA)
         src/cuda_benchmark.cpp
         src/fixed_median.cpp
     )
+    add_executable(phase_a_cuda_kernel_benchmark
+        src/cuda_kernel_benchmark.cpp
+        src/fixed_median.cpp
+    )
 
-    foreach(cuda_target IN ITEMS phase_a_cuda_validation phase_a_cuda_benchmark)
+    foreach(cuda_target IN ITEMS
+            phase_a_cuda_validation
+            phase_a_cuda_benchmark
+            phase_a_cuda_kernel_benchmark)
         target_include_directories(${cuda_target}
             PRIVATE
                 "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -143,6 +151,10 @@ if(PHASE_A_ENABLE_CUDA)
             PHASE_A_REFERENCE_OUTPUT_PATH="${PHASE_A_REFERENCE_OUTPUT_PATH}"
     )
     target_compile_definitions(phase_a_cuda_benchmark
+        PRIVATE
+            PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
+    )
+    target_compile_definitions(phase_a_cuda_kernel_benchmark
         PRIVATE
             PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
     )

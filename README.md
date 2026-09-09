@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, and a profiled correctness-first CUDA baseline.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, and a profiled correctness-first CUDA baseline with stabilized kernel benchmarking.
 
-The first evidence-led CUDA optimization is next. Python bindings, the adaptive native implementation, and Projects 2–4 remain planned work.
+A shared-memory CUDA optimization experiment is next. Python bindings, the adaptive native implementation, and Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -14,7 +14,8 @@ The first evidence-led CUDA optimization is next. Python bindings, the adaptive 
 | Portable OpenMP multicore | Complete | Static coarse-grained decomposition with measured Windows scaling |
 | Correctness-first CUDA baseline | Complete | Exact validation plus separate kernel and transfer-inclusive measurement |
 | CUDA baseline profiling | Complete | Nsight Compute identified a mixed instruction/latency bottleneck rather than DRAM bandwidth, occupancy, or divergence |
-| CUDA optimization | **Next** | A dimension-aware thread/grid mapping experiment is selected |
+| CUDA kernel timing audit | Complete | Reusable-buffer steady-state protocol separates kernel optimization from sparse one-call behavior |
+| CUDA optimization | **Next** | A scan-space shared-memory tiling experiment is selected |
 | Python interface | Planned | No binding implemented yet |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
@@ -28,7 +29,7 @@ The canonical workload contains 47,228,125 outputs with shape `(85, 35, 127, 125
 - Direct reusable C-order addressing produced another measured `1.105×` speedup against its fresh median-of-nine baseline.
 - Reprofiling found selection still dominant at approximately 70% of relevant samples.
 - Static OpenMP decomposition reached 319.583 ms at 20 threads: `8.729×` versus the fresh 2.789567 s optimized-serial baseline and 147.781 million outputs/s.
-- The CUDA baseline matched all 47,228,125 canonical optimized-serial outputs bit for bit. Its kernel median was 38.191 ms and its transfer-inclusive median was 221.693 ms, versus 332.295 ms for OpenMP at 20 threads in the same measurement session. That is `70.593×` kernel-only speedup versus serial and `1.499×` transfer-inclusive speedup versus OpenMP-20.
+- The CUDA baseline matched all 47,228,125 canonical optimized-serial outputs bit for bit. A timing audit established a 6.888 ms reusable-buffer steady-state kernel median across 20 launches with 1.879% coefficient of variation. The original sparse-invocation session—38.191 ms kernel and 221.693 ms transfer-inclusive versus 332.295 ms for OpenMP-20 (`1.499×`)—remains documented as historical rather than the baseline for kernel optimization.
 
 The optimized candidates matched the established Python and preceding C++ outputs bit for bit. Raw runs, benchmark boundaries, full scaling data, profiling caveats, and implementation progression are in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
 
@@ -57,6 +58,8 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
         src/fixed_median_cuda.cu baseline CUDA kernel and checked runtime path
         src/cuda_validation.cpp  exact fixture-validation executable
         src/cuda_benchmark.cpp   serial/OpenMP/CUDA benchmark executable
+        src/cuda_kernel_benchmark.cpp
+                                 reusable-buffer steady-state kernel benchmark
     reference_data/public_synthetic/
                                  public deterministic correctness fixture
     benchmark_data/              instructions for local compatible inputs

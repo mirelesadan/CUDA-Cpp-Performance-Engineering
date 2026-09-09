@@ -3,9 +3,11 @@
 #include <cuda_runtime.h>
 
 #include <array>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace phase_a {
@@ -216,6 +218,30 @@ void synchronize_and_check(const Event& event, const char* operation)
     check_cuda(cudaEventSynchronize(event.get()), operation);
 }
 
+double time_baseline_kernel_launch(
+    const double* input,
+    double* output,
+    std::size_t element_count,
+    const Dimensions4D& dimensions,
+    unsigned int block_count,
+    const Event& start,
+    const Event& end)
+{
+    record_and_check(start, "cudaEventRecord before baseline kernel");
+    fixed_median_3x3_kernel<<<block_count, threads_per_block>>>(
+        input,
+        output,
+        element_count,
+        dimensions.scan_y,
+        dimensions.scan_x,
+        dimensions.detector_y,
+        dimensions.detector_x);
+    check_cuda(cudaGetLastError(), "fixed_median_3x3_kernel launch");
+    record_and_check(end, "cudaEventRecord after baseline kernel");
+    synchronize_and_check(end, "cudaEventSynchronize after baseline kernel");
+    return elapsed_milliseconds(start, end);
+}
+
 } // namespace
 
 CudaDeviceInfo cuda_device_info()
@@ -300,6 +326,97 @@ CudaFilterResult fixed_median_3x3_cuda_baseline(
         timing.host_to_device + timing.kernel + timing.device_to_host;
 
     return {std::move(output), timing};
+}
+
+CudaKernelTimingSequence benchmark_fixed_median_3x3_cuda_baseline_kernel(
+    const std::vector<double>& input,
+    const Dimensions4D& dimensions,
+    std::size_t warmup_launch_count,
+    std::size_t timed_launch_count,
+    unsigned int idle_milliseconds,
+    std::size_t post_idle_launch_count)
+{
+    if (warmup_launch_count == 0 || timed_launch_count == 0) {
+        throw std::invalid_argument(
+            "CUDA kernel benchmark requires warm-up and timed launches.");
+    }
+
+    const std::size_t element_count = checked_element_count(dimensions);
+    if (input.size() != element_count) {
+        throw std::invalid_argument("Input element count does not match the supplied 4D dimensions.");
+    }
+    if (dimensions.scan_y > static_cast<std::size_t>(std::numeric_limits<long long>::max()) ||
+        dimensions.scan_x > static_cast<std::size_t>(std::numeric_limits<long long>::max())) {
+        throw std::overflow_error("Scan dimensions are too large for signed reflected indexing.");
+    }
+
+    check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+    cudaDeviceProp properties{};
+    check_cuda(
+        cudaGetDeviceProperties(&properties, cuda_device_index),
+        "cudaGetDeviceProperties");
+    const std::size_t block_count =
+        (element_count + threads_per_block - 1) / threads_per_block;
+    if (block_count > static_cast<std::size_t>(properties.maxGridSize[0])) {
+        throw std::overflow_error(
+            "CUDA baseline requires more one-dimensional blocks than the device supports.");
+    }
+
+    const std::size_t bytes = element_count * sizeof(double);
+    CudaKernelTimingSequence result;
+    result.output.resize(element_count);
+    result.warmup_kernel_milliseconds.reserve(warmup_launch_count);
+    result.steady_kernel_milliseconds.reserve(timed_launch_count);
+    result.post_idle_kernel_milliseconds.reserve(post_idle_launch_count);
+
+    DeviceBuffer device_input(bytes);
+    DeviceBuffer device_output(bytes);
+    Event start;
+    Event end;
+    check_cuda(
+        cudaMemcpy(device_input.get(), input.data(), bytes, cudaMemcpyHostToDevice),
+        "cudaMemcpy H2D before kernel benchmark");
+
+    const unsigned int launch_block_count = static_cast<unsigned int>(block_count);
+    for (std::size_t launch = 0; launch < warmup_launch_count; ++launch) {
+        result.warmup_kernel_milliseconds.push_back(time_baseline_kernel_launch(
+            device_input.get(),
+            device_output.get(),
+            element_count,
+            dimensions,
+            launch_block_count,
+            start,
+            end));
+    }
+    for (std::size_t launch = 0; launch < timed_launch_count; ++launch) {
+        result.steady_kernel_milliseconds.push_back(time_baseline_kernel_launch(
+            device_input.get(),
+            device_output.get(),
+            element_count,
+            dimensions,
+            launch_block_count,
+            start,
+            end));
+    }
+
+    if (idle_milliseconds != 0 && post_idle_launch_count != 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(idle_milliseconds));
+        for (std::size_t launch = 0; launch < post_idle_launch_count; ++launch) {
+            result.post_idle_kernel_milliseconds.push_back(time_baseline_kernel_launch(
+                device_input.get(),
+                device_output.get(),
+                element_count,
+                dimensions,
+                launch_block_count,
+                start,
+                end));
+        }
+    }
+
+    check_cuda(
+        cudaMemcpy(result.output.data(), device_output.get(), bytes, cudaMemcpyDeviceToHost),
+        "cudaMemcpy D2H after kernel benchmark");
+    return result;
 }
 
 } // namespace phase_a

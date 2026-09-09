@@ -28,10 +28,25 @@ struct CudaFilterResult {
     CudaTimingMilliseconds timing;
 };
 
+struct CudaKernelTimingSequence {
+    std::vector<double> output;
+    std::vector<double> warmup_kernel_milliseconds;
+    std::vector<double> steady_kernel_milliseconds;
+    std::vector<double> post_idle_kernel_milliseconds;
+};
+
 CudaDeviceInfo cuda_device_info();
 
 CudaFilterResult fixed_median_3x3_cuda_baseline(
     const std::vector<double>& input,
     const Dimensions4D& dimensions);
+
+CudaKernelTimingSequence benchmark_fixed_median_3x3_cuda_baseline_kernel(
+    const std::vector<double>& input,
+    const Dimensions4D& dimensions,
+    std::size_t warmup_launch_count,
+    std::size_t timed_launch_count,
+    unsigned int idle_milliseconds,
+    std::size_t post_idle_launch_count);
 
 } // namespace phase_a

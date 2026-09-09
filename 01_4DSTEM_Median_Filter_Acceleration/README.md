@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, two isolated serial experiments, Windows multicore scaling, first CUDA measurement, and CUDA baseline profile are recorded below. Evidence-led CUDA optimization is next; Python bindings and native Phase B work are planned.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, two isolated serial experiments, Windows multicore scaling, first CUDA measurement, CUDA baseline profile, and stabilized kernel benchmark are recorded below. Evidence-led CUDA optimization is next; Python bindings and native Phase B work are planned.
 
 ## Performance boundary
 
@@ -216,11 +216,11 @@ The AC-powered Windows laptop used one untimed warm-up and three timed calls per
 | CUDA D2H | 107.876, 53.858, 122.051 | 53.858 / 107.876 / 122.051 | — |
 | CUDA total path | 177.542, 221.693, 275.530 | 177.542 / 221.693 / 275.530 | 213.034 Moutput/s |
 
-Kernel-only speedup was `70.593×` over optimized serial and `8.701×` over OpenMP; the transfer-inclusive path was `12.161×` and `1.499×`, respectively. Transfers occupied 76–86% of each measured total, so this baseline is transfer-sensitive for the canonical one-call workflow. The raw transfer and kernel spread also makes repetition and power-state control important. Architectural limitations are intentionally unresolved: every thread repeats coordinate decoding and reflection, reads nine global values without cooperative reuse, and transfers the full input and output for each call. Python bindings remain planned after the GPU path matures.
+In this original sparse-invocation session, kernel-only speedup was `70.593×` over optimized serial and `8.701×` over OpenMP; the transfer-inclusive path was `12.161×` and `1.499×`, respectively. Transfers occupied 76–86% of each measured total, so this baseline is transfer-sensitive for the canonical one-call workflow. These raw historical results are preserved, but the later timing audit below supersedes 38.191 ms as the baseline for isolated kernel optimization. Architectural limitations are intentionally unresolved: every thread repeats coordinate decoding and reflection, reads nine global values without cooperative reuse, and transfers the full input and output for each call. Python bindings remain planned after the GPU path matures.
 
 ### Phase A CUDA baseline profile — 2026-09-09
 
-Nsight Compute 2025.2.1 profiled one post-warm-up canonical kernel launch from the unchanged CUDA 12.9, `sm_89` Release implementation. A focused Basic pass and targeted compute, memory, instruction, scheduler, warp-state, and source-counter sections used kernel replay; an otherwise identical ignored build added CUDA line information only for source attribution. Replay duration is not benchmark evidence, so the established unprofiled 38.191 ms kernel median remains the performance reference.
+Nsight Compute 2025.2.1 profiled one post-warm-up canonical kernel launch from the unchanged CUDA 12.9, `sm_89` Release implementation. A focused Basic pass and targeted compute, memory, instruction, scheduler, warp-state, and source-counter sections used kernel replay; an otherwise identical ignored build added CUDA line information only for source attribution. Replay duration is not benchmark evidence. The profile was initially interpreted against the then-established unprofiled 38.191 ms result; the later timing audit below provides the steady-state reference for future kernel experiments.
 
 | Metric | Result |
 | --- | ---: |
@@ -238,7 +238,26 @@ The kernel is a mixed instruction/latency workload: its FP64 pipeline reached 83
 
 Source attribution is intentionally conservative because inlined caller/callee rows overlap. The entry/decode region accounted for 123.97 million attributed warp instructions, reflection for 205.33 million, and the fused neighborhood address/load line for 159.39 million plus all excess sectors. Comparator-line samples were dominated by load-related stalls, so they cannot be interpreted as pure median-network time; the output store was fully coalesced and not a meaningful hotspot.
 
-Ranked optimization candidates are: (1) dimension-aware grid/thread mapping that removes repeated flat-index-to-4D decode and simplifies address generation while preserving detector-x coalescing; (2) mapping-aware scan-space shared-memory tiling to reduce the nine global loads and L1TEX dependency pressure; and (3) boundary specialization or precomputed reflection coordinates. The selected next isolated experiment is dimension-aware mapping because it is tractable, directly targets substantial integer/address work, and establishes the layout needed to evaluate tiling cleanly.
+Ranked optimization candidates were: (1) dimension-aware grid/thread mapping that removes repeated flat-index-to-4D decode and simplifies address generation while preserving detector-x coalescing; (2) mapping-aware scan-space shared-memory tiling to reduce the nine global loads and L1TEX dependency pressure; and (3) boundary specialization or precomputed reflection coordinates. The first candidate was subsequently tested, matched all 47,228,125 outputs bit for bit, but produced no measurable gain (`6.538816` versus `6.538336` ms median) and was discarded.
+
+### Phase A CUDA kernel timing audit — 2026-09-09
+
+The original and mapping-experiment paths both placed CUDA events immediately before the unchanged baseline launch and immediately after it, then synchronized on the ending event. Neither kernel interval included `cudaMalloc`/`cudaFree`, H2D/D2H copies, host-output allocation, validation, runtime initialization, or event creation/destruction. The historical harness created buffers and events for every call and placed approximately three seconds of serial/OpenMP work before each timed CUDA invocation; the mapping experiment issued GPU calls continuously. Source and CMake history confirm the same kernel, 256-thread one-dimensional launch, canonical input, CUDA 12.9 `sm_89` Release build, reflection, and median network.
+
+A dedicated kernel benchmark now initializes the runtime, allocates buffers, creates events, and copies the input before measurement. It reuses those resources for five diagnostic warm-up launches, 20 individually recorded steady-state launches, a bounded three-second idle, and five recovery launches. The AC-powered GPU reported P8/210 MHz before the sequence, so the warm-up observations include its natural transition without changing device settings.
+
+```text
+warm-up: 7.147200, 6.913024, 6.901760, 6.905632, 6.860608 ms
+steady:  6.877184, 6.858752, 6.881280, 6.920192, 6.863872,
+         6.906880, 6.886400, 6.895616, 6.872064, 6.907904,
+         6.945792, 6.857728, 6.900736, 6.944768, 6.969344,
+         6.961152, 6.888448, 6.689792, 6.501376, 6.506496 ms
+post-idle: 6.857536, 6.981632, 6.936576, 6.968320, 6.882304 ms
+```
+
+The steady-state min/median/max was `6.501376 / 6.888448 / 6.969344` ms, the mean was `6.851789` ms, the population coefficient of variation was `1.878692%`, and throughput was 6856.134 Moutput/s. Output again matched optimized serial C++ bit for bit. A current rerun of the exact historical interleaved harness produced `6.881920, 6.919520, 45.636513` ms, directly demonstrating that the sparse protocol can admit large event-duration outliers; a three-second idle with persistent buffers alone did not reproduce them.
+
+The 38.191 ms historical median was not caused by broader timing boundaries, a different kernel, or a different build. The evidence supports transient scheduling/contention associated with sparse invocations and per-call resource/copy cadence, but does not isolate a single driver or WDDM mechanism or recover the condition that made all three historical samples high; simple clock ramping is insufficient to explain it. Future isolated CUDA experiments therefore use persistent buffers, at least five warm-ups, at least 20 individual event-timed launches, raw-sequence reporting, median/min/max/CV, and separate transfer measurements. Shared-memory scan-space tiling is the next experiment.
 
 ## Phase B — adaptive median performance target
 
@@ -324,6 +343,7 @@ Completed reference and organization work:
 - portable OpenMP CPU implementation with exact fixture/canonical equivalence and a best measured `8.729×` speedup at 20 threads on the Windows laptop.
 - correctness-first CUDA baseline with exact fixture/canonical equivalence, separate event-based transfer/kernel timings, and a measured `1.499×` transfer-inclusive speedup over 20-thread OpenMP on the RTX 4070 Laptop GPU system.
 - focused Nsight Compute baseline profile identifying a mixed FP64-instruction and L1TEX/dependency-latency bottleneck and selecting dimension-aware thread/grid mapping as the next controlled experiment.
+- CUDA timing audit establishing a reusable-buffer 20-launch kernel protocol and a 6.888448 ms steady-state baseline; the correct dimension-aware mapping candidate produced no measurable speedup and was discarded.
 
 Next/planned: evidence-led CUDA optimization, adaptive C++, Python bindings, and final cross-size performance claims.
 
@@ -333,6 +353,6 @@ Next/planned: evidence-led CUDA optimization, adaptive C++, Python bindings, and
 - Supported native dtypes and whether nondefault odd adaptive windows belong in the first implementation.
 - Linux/Lambda GCC-or-Clang OpenMP build validation and multicore scaling.
 - Native dtype expansion and allocation policy beyond the current `float64` fixed-filter path.
-- CUDA tiling/layout experiments, transfer amortization, and CPU/GPU crossover studies.
+- CUDA shared-memory tiling, transfer amortization, and CPU/GPU crossover studies.
 - Python binding technology and copy/ownership behavior.
 - Scientific validation on replacement datasets whose detector sampling differs from the current source.
