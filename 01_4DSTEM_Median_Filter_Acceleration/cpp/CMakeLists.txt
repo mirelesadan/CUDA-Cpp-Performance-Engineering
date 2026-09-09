@@ -123,11 +123,16 @@ if(PHASE_A_ENABLE_CUDA)
         src/cuda_kernel_benchmark.cpp
         src/fixed_median.cpp
     )
+    add_executable(phase_a_cuda_transfer_characterization
+        src/cuda_transfer_characterization.cpp
+        src/fixed_median.cpp
+    )
 
     foreach(cuda_target IN ITEMS
             phase_a_cuda_validation
             phase_a_cuda_benchmark
-            phase_a_cuda_kernel_benchmark)
+            phase_a_cuda_kernel_benchmark
+            phase_a_cuda_transfer_characterization)
         target_include_directories(${cuda_target}
             PRIVATE
                 "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -155,6 +160,10 @@ if(PHASE_A_ENABLE_CUDA)
             PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
     )
     target_compile_definitions(phase_a_cuda_kernel_benchmark
+        PRIVATE
+            PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
+    )
+    target_compile_definitions(phase_a_cuda_transfer_characterization
         PRIVATE
             PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
     )

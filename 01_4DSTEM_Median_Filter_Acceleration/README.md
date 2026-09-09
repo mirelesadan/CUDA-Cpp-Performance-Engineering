@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, two isolated serial experiments, Windows multicore scaling, first CUDA measurement, CUDA baseline profile, and stabilized kernel benchmark are recorded below. Evidence-led CUDA optimization is next; Python bindings and native Phase B work are planned.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, and transfer/residency characterization are recorded below. The Phase A kernel-optimization checkpoint is complete; Python integration and native Phase B work are next.
 
 ## Performance boundary
 
@@ -54,6 +54,8 @@ cpp/
         fixed_median_cuda.hpp
     src/
         cuda_benchmark.cpp
+        cuda_kernel_benchmark.cpp
+        cuda_transfer_characterization.cpp
         cuda_validation.cpp
         main.cpp
         fixed_median.cpp
@@ -83,9 +85,11 @@ On this Windows system, CUDA 12.9 is selected explicitly because its Visual Stud
 
 ```bat
 cmake -S cpp -B cpp/out/cuda -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPHASE_A_ENABLE_CUDA=ON -DPHASE_A_CUDA_ARCHITECTURES=89
-cmake --build cpp/out/cuda --config Release --target phase_a_cuda_validation phase_a_cuda_benchmark
+cmake --build cpp/out/cuda --config Release --target phase_a_cuda_validation phase_a_cuda_benchmark phase_a_cuda_kernel_benchmark phase_a_cuda_transfer_characterization
 cpp\out\cuda\Release\phase_a_cuda_validation.exe
 cpp\out\cuda\Release\phase_a_cuda_benchmark.exe
+cpp\out\cuda\Release\phase_a_cuda_kernel_benchmark.exe
+cpp\out\cuda\Release\phase_a_cuda_transfer_characterization.exe
 ```
 
 Other installations with registered CUDA integration may omit the explicit `-T` selection; `PHASE_A_CUDA_ARCHITECTURES` remains overridable for other GPUs. No Visual Studio or toolkit installation was modified.
@@ -257,7 +261,64 @@ post-idle: 6.857536, 6.981632, 6.936576, 6.968320, 6.882304 ms
 
 The steady-state min/median/max was `6.501376 / 6.888448 / 6.969344` ms, the mean was `6.851789` ms, the population coefficient of variation was `1.878692%`, and throughput was 6856.134 Moutput/s. Output again matched optimized serial C++ bit for bit. A current rerun of the exact historical interleaved harness produced `6.881920, 6.919520, 45.636513` ms, directly demonstrating that the sparse protocol can admit large event-duration outliers; a three-second idle with persistent buffers alone did not reproduce them.
 
-The 38.191 ms historical median was not caused by broader timing boundaries, a different kernel, or a different build. The evidence supports transient scheduling/contention associated with sparse invocations and per-call resource/copy cadence, but does not isolate a single driver or WDDM mechanism or recover the condition that made all three historical samples high; simple clock ramping is insufficient to explain it. Future isolated CUDA experiments therefore use persistent buffers, at least five warm-ups, at least 20 individual event-timed launches, raw-sequence reporting, median/min/max/CV, and separate transfer measurements. Shared-memory scan-space tiling is the next experiment.
+The 38.191 ms historical median was not caused by broader timing boundaries, a different kernel, or a different build. The evidence supports transient scheduling/contention associated with sparse invocations and per-call resource/copy cadence, but does not isolate a single driver or WDDM mechanism or recover the condition that made all three historical samples high; simple clock ramping is insufficient to explain it. Future isolated CUDA experiments therefore use persistent buffers, at least five warm-ups, at least 20 individual event-timed launches, raw-sequence reporting, median/min/max/CV, and separate transfer measurements.
+
+Two further isolated kernel experiments completed the optimization checkpoint. Scan-space shared-memory tiling remained bitwise exact but regressed the median by approximately 1.3%; an interior reflection fast path covered 92.067% of canonical outputs but improved the median by only 0.635%, within 2.34–2.45% run-to-run CV. Both were discarded, as was the correct but neutral dimension-aware mapping experiment. The retained kernel is unchanged.
+
+### Phase A CUDA transfer and residency characterization — 2026-09-09
+
+The dedicated `phase_a_cuda_transfer_characterization` target reuses the retained kernel with persistent device buffers and events. For the canonical input, five complete pageable-path warm-ups preceded 20 CUDA-event-timed runs. Each run measured synchronous H2D, kernel, and D2H separately; the reported total is their per-run sum. Allocation, event creation, validation, host allocation, and file I/O are excluded. The output again matched all 47,228,125 optimized-serial values bit for bit.
+
+```text
+H2D:    46.279552, 47.947582, 73.867165, 53.492352, 33.413185, 54.386398, 51.509918, 40.087200, 44.956097, 43.994785, 36.467903, 46.300034, 52.247646, 45.358784, 33.288479, 32.649506, 32.475681, 43.193569, 40.167809, 41.090015 ms
+kernel: 6.581984, 6.538336, 6.599136, 6.534816, 6.530912, 6.586944, 6.565472, 6.559552, 6.532480, 6.527072, 6.568512, 6.591424, 6.687040, 6.549760, 6.533472, 6.528736, 6.524192, 6.531008, 6.582624, 6.557568 ms
+D2H:    48.917343, 46.924446, 79.606941, 39.838463, 43.254112, 55.531071, 54.039616, 32.850945, 57.024513, 43.983521, 43.037025, 50.029568, 62.753471, 34.107521, 30.511871, 31.364128, 34.032799, 40.164738, 60.745502, 43.202751 ms
+total:  101.778880, 101.410364, 160.073242, 99.865630, 83.198209, 116.504413, 112.115006, 79.497697, 108.513090, 94.505378, 86.073441, 102.921025, 121.688158, 86.016065, 70.333822, 70.542370, 73.032672, 89.889315, 107.495935, 90.850335 ms
+```
+
+| Pageable stage | Min / median / max (ms) | Mean (ms) | Population CV |
+| --- | ---: | ---: | ---: |
+| H2D | 32.475681 / 44.956097 / 73.867165 | 44.658683 | 21.354% |
+| Kernel | 6.524192 / 6.557568 / 6.687040 | 6.560552 | 0.572% |
+| D2H | 30.511871 / 43.983521 / 79.606941 | 46.596017 | 25.998% |
+| Total | 70.333822 / 99.865630 / 160.073242 | 97.815252 | 20.862% |
+
+Transfers accounted for a median 93.456% of one-call time and were substantially more variable than the kernel. Fresh CPU medians were 2622.180 ms optimized serial and 336.586 ms at 20 OpenMP threads, so the 99.866 ms pageable CUDA total was `26.257×` faster than serial and `3.370×` faster than OpenMP on this machine.
+
+The residency experiment copied the input once, launched the same filter repeatedly against that unchanged device input while overwriting the same device output, and copied the final output once. Three warm-ups preceded ten timed sequences at each iteration count.
+
+| Resident filter count | Median total (ms) | Effective ms/filter | Median transfer fraction | Speedup vs serial / OpenMP-20 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 88.788420 | 88.788420 | 92.640% | 29.533× / 3.791× |
+| 2 | 106.650784 | 53.325392 | 87.750% | 49.173× / 6.312× |
+| 5 | 123.348515 | 24.669703 | 73.664% | 106.292× / 13.644× |
+| 10 | 170.825756 | 17.082576 | 61.962% | 153.500× / 19.703× |
+
+```text
+1 iteration:  123.204061, 95.317442, 82.106210, 103.229632, 97.835805, 73.607809, 85.938048, 76.101058, 72.153438, 88.788420 ms
+2 iterations: 117.125441, 107.886592, 107.393633, 77.824194, 86.703265, 89.978367, 84.615970, 106.650784, 92.422240, 108.408609 ms
+5 iterations: 152.331779, 132.603550, 105.787903, 110.765663, 115.457245, 122.004318, 106.257183, 131.130623, 153.293919, 123.348515 ms
+10 iterations: 170.825756, 160.657249, 210.825409, 215.411423, 148.588642, 159.967167, 247.711288, 156.640541, 183.565376, 138.199429 ms
+```
+
+Even ten operations did not make pageable transfers minor. Using the observed approximately 6.50 ms/kernel and 103 ms combined transfer medians, a simple linear estimate requires roughly 64 resident operations before transfers fall below 20%; the corresponding estimate with pinned staging is roughly 37. These are explanatory extrapolations, not measured thresholds.
+
+A separate synchronous transfer-only diagnostic interleaved pageable storage with RAII-managed `cudaMallocHost` buffers; it did not add streams or overlap.
+
+| Transfer diagnostic | Min / median / max (ms) | Population CV |
+| --- | ---: | ---: |
+| Pageable H2D | 32.388992 / 50.255390 / 105.614014 | 34.633% |
+| Pinned H2D | 30.010529 / 30.337120 / 30.743168 | 0.581% |
+| Pageable D2H | 31.007168 / 38.627647 / 86.187294 | 32.128% |
+| Pinned D2H | 28.763519 / 28.912161 / 29.127712 | 0.302% |
+| Pageable H2D + D2H pair | 63.782049 / 93.732064 / 174.655968 | 31.450% |
+| Pinned H2D + D2H pair | 58.830846 / 59.254273 / 59.648447 | 0.383% |
+
+Pinned storage made the transfer pair `1.582×` faster, a 36.783% reduction, and far less variable. It is therefore worth considering at the Python boundary, but avoiding repeated transfers through explicit device residency has the larger architectural value.
+
+A bounded synthetic size check compared optimized serial, OpenMP at 4/8/20 threads, and the pageable CUDA total. OpenMP was fastest through 4,096,000 outputs; CUDA was fastest at 10,000,000 and at the 47,228,125-output canonical workload. The observed crossover therefore lies between approximately 4.1 and 10 million outputs for these shapes on this laptop. Because pageable-copy variability was high and shape affects cache behavior, this bracket is directional rather than universal.
+
+The future Python interface should offer a simple copying call for convenience and an explicit persistent device-resident path for repeated or multi-stage GPU work, with clear upload/filter/download ownership and lifetime. Pinned host staging can be an opt-in implementation detail for unavoidable synchronous copies; device-resident interoperability should take priority over forcing every NumPy call through a copy.
 
 ## Phase B — adaptive median performance target
 
@@ -319,7 +380,7 @@ For authorized local scientific work, place the experimental source outside vers
 
 ## Planned engineering progression
 
-Phase A remains the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling, first CUDA, and introductory GPU profiling.
+Phase A remains the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
 
 Phase B is the main progression: reproduce the exact adaptive contract in clear C++, validate it, profile and optimize CPU behavior, implement and profile CUDA, optimize from evidence, integrate with Python, and report a reproducible benchmark matrix.
 
@@ -344,15 +405,16 @@ Completed reference and organization work:
 - correctness-first CUDA baseline with exact fixture/canonical equivalence, separate event-based transfer/kernel timings, and a measured `1.499×` transfer-inclusive speedup over 20-thread OpenMP on the RTX 4070 Laptop GPU system.
 - focused Nsight Compute baseline profile identifying a mixed FP64-instruction and L1TEX/dependency-latency bottleneck and selecting dimension-aware thread/grid mapping as the next controlled experiment.
 - CUDA timing audit establishing a reusable-buffer 20-launch kernel protocol and a 6.888448 ms steady-state baseline; the correct dimension-aware mapping candidate produced no measurable speedup and was discarded.
+- CUDA optimization checkpoint completing three exact isolated experiments: dimension-aware mapping was neutral, shared-memory tiling regressed approximately 1.3%, and the reflection fast path gained only 0.635% within variability; all candidates were discarded.
+- CUDA transfer/residency characterization establishing a 99.865630 ms pageable one-call median, `3.370×` speedup over fresh OpenMP-20, material pinned-transfer benefit, and a directional 4.1–10 million-output CPU/GPU crossover bracket.
 
-Next/planned: evidence-led CUDA optimization, adaptive C++, Python bindings, and final cross-size performance claims.
+Next/planned: design and implement the Phase A Python interface around explicit device residency, then continue native Phase B work and broader cross-platform validation.
 
 ## Remaining TBDs
 
-- Expanded repetition policy and problem-size matrix beyond this initial canonical-input baseline.
+- Broader cross-platform repetition and problem-size validation beyond the current Windows laptop.
 - Supported native dtypes and whether nondefault odd adaptive windows belong in the first implementation.
 - Linux/Lambda GCC-or-Clang OpenMP build validation and multicore scaling.
 - Native dtype expansion and allocation policy beyond the current `float64` fixed-filter path.
-- CUDA shared-memory tiling, transfer amortization, and CPU/GPU crossover studies.
-- Python binding technology and copy/ownership behavior.
+- Python binding technology, CUDA-array interoperability, and precise copy/ownership behavior.
 - Scientific validation on replacement datasets whose detector sampling differs from the current source.

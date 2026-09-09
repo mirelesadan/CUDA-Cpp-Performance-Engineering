@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <limits>
@@ -66,6 +67,32 @@ public:
 
     DeviceBuffer(const DeviceBuffer&) = delete;
     DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+
+    double* get()
+    {
+        return static_cast<double*>(pointer_);
+    }
+
+private:
+    void* pointer_ = nullptr;
+};
+
+class PinnedHostBuffer {
+public:
+    explicit PinnedHostBuffer(std::size_t bytes)
+    {
+        check_cuda(cudaMallocHost(&pointer_, bytes), "cudaMallocHost");
+    }
+
+    ~PinnedHostBuffer()
+    {
+        if (pointer_ != nullptr) {
+            cudaFreeHost(pointer_);
+        }
+    }
+
+    PinnedHostBuffer(const PinnedHostBuffer&) = delete;
+    PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
 
     double* get()
     {
@@ -242,6 +269,155 @@ double time_baseline_kernel_launch(
     return elapsed_milliseconds(start, end);
 }
 
+double time_copy(
+    void* destination,
+    const void* source,
+    std::size_t bytes,
+    cudaMemcpyKind direction,
+    const Event& start,
+    const Event& end,
+    const char* operation)
+{
+    record_and_check(start, "cudaEventRecord before transfer");
+    check_cuda(cudaMemcpy(destination, source, bytes, direction), operation);
+    record_and_check(end, "cudaEventRecord after transfer");
+    synchronize_and_check(end, "cudaEventSynchronize after transfer");
+    return elapsed_milliseconds(start, end);
+}
+
+CudaTimingMilliseconds time_pageable_path(
+    const double* host_input,
+    double* host_output,
+    double* device_input,
+    double* device_output,
+    std::size_t bytes,
+    std::size_t element_count,
+    const Dimensions4D& dimensions,
+    unsigned int block_count,
+    const Event& start,
+    const Event& end)
+{
+    CudaTimingMilliseconds timing;
+    timing.host_to_device = time_copy(
+        device_input,
+        host_input,
+        bytes,
+        cudaMemcpyHostToDevice,
+        start,
+        end,
+        "pageable cudaMemcpy H2D");
+    timing.kernel = time_baseline_kernel_launch(
+        device_input,
+        device_output,
+        element_count,
+        dimensions,
+        block_count,
+        start,
+        end);
+    timing.device_to_host = time_copy(
+        host_output,
+        device_output,
+        bytes,
+        cudaMemcpyDeviceToHost,
+        start,
+        end,
+        "pageable cudaMemcpy D2H");
+    timing.total_gpu_path =
+        timing.host_to_device + timing.kernel + timing.device_to_host;
+    return timing;
+}
+
+CudaTimingMilliseconds time_resident_path(
+    const double* host_input,
+    double* host_output,
+    double* device_input,
+    double* device_output,
+    std::size_t bytes,
+    std::size_t element_count,
+    const Dimensions4D& dimensions,
+    unsigned int block_count,
+    std::size_t iteration_count,
+    const Event& start,
+    const Event& end)
+{
+    CudaTimingMilliseconds timing;
+    timing.host_to_device = time_copy(
+        device_input,
+        host_input,
+        bytes,
+        cudaMemcpyHostToDevice,
+        start,
+        end,
+        "resident-path pageable cudaMemcpy H2D");
+
+    record_and_check(start, "cudaEventRecord before resident kernel sequence");
+    // Every operation reads the same resident input and overwrites the same output;
+    // this amortizes transfers without changing the filter applied by each launch.
+    for (std::size_t iteration = 0; iteration < iteration_count; ++iteration) {
+        fixed_median_3x3_kernel<<<block_count, threads_per_block>>>(
+            device_input,
+            device_output,
+            element_count,
+            dimensions.scan_y,
+            dimensions.scan_x,
+            dimensions.detector_y,
+            dimensions.detector_x);
+        check_cuda(cudaGetLastError(), "resident fixed_median_3x3_kernel launch");
+    }
+    record_and_check(end, "cudaEventRecord after resident kernel sequence");
+    synchronize_and_check(end, "cudaEventSynchronize after resident kernel sequence");
+    timing.kernel = elapsed_milliseconds(start, end);
+
+    timing.device_to_host = time_copy(
+        host_output,
+        device_output,
+        bytes,
+        cudaMemcpyDeviceToHost,
+        start,
+        end,
+        "resident-path pageable cudaMemcpy D2H");
+    timing.total_gpu_path =
+        timing.host_to_device + timing.kernel + timing.device_to_host;
+    return timing;
+}
+
+struct BenchmarkLaunch {
+    std::size_t element_count = 0;
+    std::size_t bytes = 0;
+    unsigned int block_count = 0;
+};
+
+BenchmarkLaunch prepare_benchmark_launch(
+    const std::vector<double>& input,
+    const Dimensions4D& dimensions)
+{
+    const std::size_t element_count = checked_element_count(dimensions);
+    if (input.size() != element_count) {
+        throw std::invalid_argument("Input element count does not match the supplied 4D dimensions.");
+    }
+    if (dimensions.scan_y > static_cast<std::size_t>(std::numeric_limits<long long>::max()) ||
+        dimensions.scan_x > static_cast<std::size_t>(std::numeric_limits<long long>::max())) {
+        throw std::overflow_error("Scan dimensions are too large for signed reflected indexing.");
+    }
+
+    check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+    cudaDeviceProp properties{};
+    check_cuda(
+        cudaGetDeviceProperties(&properties, cuda_device_index),
+        "cudaGetDeviceProperties");
+    const std::size_t block_count =
+        (element_count + threads_per_block - 1) / threads_per_block;
+    if (block_count > static_cast<std::size_t>(properties.maxGridSize[0])) {
+        throw std::overflow_error(
+            "CUDA transfer benchmark exceeds the one-dimensional grid limit.");
+    }
+    return {
+        element_count,
+        element_count * sizeof(double),
+        static_cast<unsigned int>(block_count),
+    };
+}
+
 } // namespace
 
 CudaDeviceInfo cuda_device_info()
@@ -416,6 +592,252 @@ CudaKernelTimingSequence benchmark_fixed_median_3x3_cuda_baseline_kernel(
     check_cuda(
         cudaMemcpy(result.output.data(), device_output.get(), bytes, cudaMemcpyDeviceToHost),
         "cudaMemcpy D2H after kernel benchmark");
+    return result;
+}
+
+CudaPageablePathBenchmarkResult benchmark_fixed_median_3x3_cuda_pageable_path(
+    const std::vector<double>& input,
+    const Dimensions4D& dimensions,
+    std::size_t warmup_run_count,
+    std::size_t timed_run_count)
+{
+    if (warmup_run_count == 0 || timed_run_count == 0) {
+        throw std::invalid_argument(
+            "CUDA pageable-path benchmark requires warm-up and timed runs.");
+    }
+
+    const BenchmarkLaunch launch = prepare_benchmark_launch(input, dimensions);
+    CudaPageablePathBenchmarkResult result;
+    result.output.resize(launch.element_count);
+    result.timed_runs.reserve(timed_run_count);
+    DeviceBuffer device_input(launch.bytes);
+    DeviceBuffer device_output(launch.bytes);
+    Event start;
+    Event end;
+
+    for (std::size_t run = 0; run < warmup_run_count; ++run) {
+        static_cast<void>(time_pageable_path(
+            input.data(),
+            result.output.data(),
+            device_input.get(),
+            device_output.get(),
+            launch.bytes,
+            launch.element_count,
+            dimensions,
+            launch.block_count,
+            start,
+            end));
+    }
+    for (std::size_t run = 0; run < timed_run_count; ++run) {
+        result.timed_runs.push_back(time_pageable_path(
+            input.data(),
+            result.output.data(),
+            device_input.get(),
+            device_output.get(),
+            launch.bytes,
+            launch.element_count,
+            dimensions,
+            launch.block_count,
+            start,
+            end));
+    }
+    return result;
+}
+
+CudaTransferCharacterizationResult characterize_fixed_median_3x3_cuda_transfers(
+    const std::vector<double>& input,
+    const Dimensions4D& dimensions,
+    std::size_t pageable_warmup_count,
+    std::size_t pageable_timed_count,
+    const std::vector<std::size_t>& residency_iteration_counts,
+    std::size_t residency_warmup_count,
+    std::size_t residency_timed_count,
+    std::size_t transfer_diagnostic_warmup_count,
+    std::size_t transfer_diagnostic_timed_count)
+{
+    if (pageable_warmup_count == 0 || pageable_timed_count == 0 ||
+        residency_warmup_count == 0 || residency_timed_count == 0 ||
+        transfer_diagnostic_warmup_count == 0 ||
+        transfer_diagnostic_timed_count == 0) {
+        throw std::invalid_argument(
+            "CUDA transfer characterization requires nonzero warm-up and timed counts.");
+    }
+    if (residency_iteration_counts.empty()) {
+        throw std::invalid_argument(
+            "CUDA transfer characterization requires residency iteration counts.");
+    }
+    for (const std::size_t iteration_count : residency_iteration_counts) {
+        if (iteration_count == 0) {
+            throw std::invalid_argument("Residency iteration counts must be nonzero.");
+        }
+    }
+
+    const BenchmarkLaunch launch = prepare_benchmark_launch(input, dimensions);
+    CudaTransferCharacterizationResult result;
+    result.output.resize(launch.element_count);
+    result.pageable_path_runs.reserve(pageable_timed_count);
+    result.residency_results.reserve(residency_iteration_counts.size());
+    for (const std::size_t iteration_count : residency_iteration_counts) {
+        result.residency_results.push_back({iteration_count, {}});
+        result.residency_results.back().timed_runs.reserve(residency_timed_count);
+    }
+
+    DeviceBuffer device_input(launch.bytes);
+    DeviceBuffer device_output(launch.bytes);
+    Event start;
+    Event end;
+
+    for (std::size_t run = 0; run < pageable_warmup_count; ++run) {
+        static_cast<void>(time_pageable_path(
+            input.data(),
+            result.output.data(),
+            device_input.get(),
+            device_output.get(),
+            launch.bytes,
+            launch.element_count,
+            dimensions,
+            launch.block_count,
+            start,
+            end));
+    }
+    for (std::size_t run = 0; run < pageable_timed_count; ++run) {
+        result.pageable_path_runs.push_back(time_pageable_path(
+            input.data(),
+            result.output.data(),
+            device_input.get(),
+            device_output.get(),
+            launch.bytes,
+            launch.element_count,
+            dimensions,
+            launch.block_count,
+            start,
+            end));
+    }
+
+    for (CudaResidencyBenchmarkResult& residency : result.residency_results) {
+        for (std::size_t run = 0; run < residency_warmup_count; ++run) {
+            static_cast<void>(time_resident_path(
+                input.data(),
+                result.output.data(),
+                device_input.get(),
+                device_output.get(),
+                launch.bytes,
+                launch.element_count,
+                dimensions,
+                launch.block_count,
+                residency.iteration_count,
+                start,
+                end));
+        }
+    }
+    for (std::size_t run = 0; run < residency_timed_count; ++run) {
+        for (CudaResidencyBenchmarkResult& residency : result.residency_results) {
+            residency.timed_runs.push_back(time_resident_path(
+                input.data(),
+                result.output.data(),
+                device_input.get(),
+                device_output.get(),
+                launch.bytes,
+                launch.element_count,
+                dimensions,
+                launch.block_count,
+                residency.iteration_count,
+                start,
+                end));
+        }
+    }
+
+    result.diagnostic_pageable_h2d_milliseconds.reserve(
+        transfer_diagnostic_timed_count);
+    result.diagnostic_pageable_d2h_milliseconds.reserve(
+        transfer_diagnostic_timed_count);
+    result.diagnostic_pinned_h2d_milliseconds.reserve(
+        transfer_diagnostic_timed_count);
+    result.diagnostic_pinned_d2h_milliseconds.reserve(
+        transfer_diagnostic_timed_count);
+
+    const auto time_pageable_transfers = [&](bool retain) {
+        const double host_to_device = time_copy(
+            device_input.get(),
+            input.data(),
+            launch.bytes,
+            cudaMemcpyHostToDevice,
+            start,
+            end,
+            "diagnostic pageable cudaMemcpy H2D");
+        const double device_to_host = time_copy(
+            result.output.data(),
+            device_output.get(),
+            launch.bytes,
+            cudaMemcpyDeviceToHost,
+            start,
+            end,
+            "diagnostic pageable cudaMemcpy D2H");
+        if (retain) {
+            result.diagnostic_pageable_h2d_milliseconds.push_back(host_to_device);
+            result.diagnostic_pageable_d2h_milliseconds.push_back(device_to_host);
+        }
+    };
+
+    try {
+        PinnedHostBuffer pinned_input(launch.bytes);
+        PinnedHostBuffer pinned_output(launch.bytes);
+        std::copy(input.begin(), input.end(), pinned_input.get());
+
+        const auto time_pinned_transfers = [&](bool retain) {
+            const double host_to_device = time_copy(
+                device_input.get(),
+                pinned_input.get(),
+                launch.bytes,
+                cudaMemcpyHostToDevice,
+                start,
+                end,
+                "diagnostic pinned cudaMemcpy H2D");
+            const double device_to_host = time_copy(
+                pinned_output.get(),
+                device_output.get(),
+                launch.bytes,
+                cudaMemcpyDeviceToHost,
+                start,
+                end,
+                "diagnostic pinned cudaMemcpy D2H");
+            if (retain) {
+                result.diagnostic_pinned_h2d_milliseconds.push_back(host_to_device);
+                result.diagnostic_pinned_d2h_milliseconds.push_back(device_to_host);
+            }
+        };
+
+        for (std::size_t run = 0; run < transfer_diagnostic_warmup_count; ++run) {
+            if (run % 2 == 0) {
+                time_pageable_transfers(false);
+                time_pinned_transfers(false);
+            }
+            else {
+                time_pinned_transfers(false);
+                time_pageable_transfers(false);
+            }
+        }
+        for (std::size_t run = 0; run < transfer_diagnostic_timed_count; ++run) {
+            if (run % 2 == 0) {
+                time_pageable_transfers(true);
+                time_pinned_transfers(true);
+            }
+            else {
+                time_pinned_transfers(true);
+                time_pageable_transfers(true);
+            }
+        }
+    }
+    catch (const std::exception& error) {
+        result.pinned_memory_error = error.what();
+        for (std::size_t run = 0; run < transfer_diagnostic_warmup_count; ++run) {
+            time_pageable_transfers(false);
+        }
+        for (std::size_t run = 0; run < transfer_diagnostic_timed_count; ++run) {
+            time_pageable_transfers(true);
+        }
+    }
+
     return result;
 }
 

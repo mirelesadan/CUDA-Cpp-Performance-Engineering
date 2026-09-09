@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, and a profiled correctness-first CUDA baseline with stabilized kernel benchmarking.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, a profiled correctness-first CUDA baseline, controlled CUDA experiments, and transfer/residency characterization.
 
-A shared-memory CUDA optimization experiment is next. Python bindings, the adaptive native implementation, and Projects 2–4 remain planned work.
+Phase A Python integration is next. The adaptive native implementation and Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -15,8 +15,9 @@ A shared-memory CUDA optimization experiment is next. Python bindings, the adapt
 | Correctness-first CUDA baseline | Complete | Exact validation plus separate kernel and transfer-inclusive measurement |
 | CUDA baseline profiling | Complete | Nsight Compute identified a mixed instruction/latency bottleneck rather than DRAM bandwidth, occupancy, or divergence |
 | CUDA kernel timing audit | Complete | Reusable-buffer steady-state protocol separates kernel optimization from sparse one-call behavior |
-| CUDA optimization | **Next** | A scan-space shared-memory tiling experiment is selected |
-| Python interface | Planned | No binding implemented yet |
+| CUDA optimization checkpoint | Complete | Three exact isolated candidates were neutral, regressive, or within variability and were discarded |
+| CUDA transfer/residency characterization | Complete | Pageable, pinned, repeated-residency, and bounded CPU/GPU crossover behavior measured |
+| Python interface | **Next** | Design will make copy behavior and persistent GPU ownership explicit |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -29,7 +30,7 @@ The canonical workload contains 47,228,125 outputs with shape `(85, 35, 127, 125
 - Direct reusable C-order addressing produced another measured `1.105×` speedup against its fresh median-of-nine baseline.
 - Reprofiling found selection still dominant at approximately 70% of relevant samples.
 - Static OpenMP decomposition reached 319.583 ms at 20 threads: `8.729×` versus the fresh 2.789567 s optimized-serial baseline and 147.781 million outputs/s.
-- The CUDA baseline matched all 47,228,125 canonical optimized-serial outputs bit for bit. A timing audit established a 6.888 ms reusable-buffer steady-state kernel median across 20 launches with 1.879% coefficient of variation. The original sparse-invocation session—38.191 ms kernel and 221.693 ms transfer-inclusive versus 332.295 ms for OpenMP-20 (`1.499×`)—remains documented as historical rather than the baseline for kernel optimization.
+- The CUDA baseline matched all 47,228,125 canonical optimized-serial outputs bit for bit. A timing audit established a 6.888 ms reusable-buffer steady-state kernel median; three subsequent kernel candidates did not justify replacing it. With persistent allocations, the current pageable one-call median was 99.866 ms versus a fresh 336.586 ms OpenMP-20 median (`3.370×`). Transfers consumed a median 93.456% of that path; pinned staging cut the transfer pair by about one-third, while ten device-resident operations reduced effective time to 17.083 ms/filter.
 
 The optimized candidates matched the established Python and preceding C++ outputs bit for bit. Raw runs, benchmark boundaries, full scaling data, profiling caveats, and implementation progression are in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
 
@@ -42,8 +43,9 @@ Python reference
   → portable OpenMP multicore CPU
   → correctness-first CUDA C++  [complete]
   → CUDA baseline profiling     [complete]
-  → CUDA optimization           [next]
-  → Python interface            [planned]
+  → CUDA optimization checkpoint [complete]
+  → transfer/residency analysis  [complete]
+  → Python interface             [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -60,6 +62,8 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
         src/cuda_benchmark.cpp   serial/OpenMP/CUDA benchmark executable
         src/cuda_kernel_benchmark.cpp
                                  reusable-buffer steady-state kernel benchmark
+        src/cuda_transfer_characterization.cpp
+                                 pageable/pinned, residency, and crossover benchmark
     reference_data/public_synthetic/
                                  public deterministic correctness fixture
     benchmark_data/              instructions for local compatible inputs
@@ -93,7 +97,7 @@ cmake --build 01_4DSTEM_Median_Filter_Acceleration/cpp/build
 
 The default executable validates both optimized serial and OpenMP output against a small deterministic synthetic fixture. Linux compilation and scaling are intended portability targets but have not yet been verified on the planned Lambda environment.
 
-The separate `phase_a_cuda_validation` and `phase_a_cuda_benchmark` targets are enabled with `PHASE_A_ENABLE_CUDA=ON`; platform-specific CUDA configuration and reproduction commands are kept in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
+The CUDA validation, comparison, stabilized-kernel, and transfer-characterization targets are enabled with `PHASE_A_ENABLE_CUDA=ON`; platform-specific CUDA configuration and reproduction commands are kept in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
 
 ## Benchmark with a local input
 
