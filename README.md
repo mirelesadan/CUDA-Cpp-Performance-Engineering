@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, and a correctness-first CUDA baseline.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, and a profiled correctness-first CUDA baseline.
 
-CUDA profiling and optimization are next. Python bindings, the adaptive native implementation, and Projects 2–4 remain planned work.
+The first evidence-led CUDA optimization is next. Python bindings, the adaptive native implementation, and Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -13,7 +13,8 @@ CUDA profiling and optimization are next. Python bindings, the adaptive native i
 | CPU profiling and serial optimization | Complete | Median-of-nine and direct-address experiments measured independently |
 | Portable OpenMP multicore | Complete | Static coarse-grained decomposition with measured Windows scaling |
 | Correctness-first CUDA baseline | Complete | Exact validation plus separate kernel and transfer-inclusive measurement |
-| CUDA profiling and optimization | **Next** | Baseline kernel awaits evidence-led profiling and optimization |
+| CUDA baseline profiling | Complete | Nsight Compute identified a mixed instruction/latency bottleneck rather than DRAM bandwidth, occupancy, or divergence |
+| CUDA optimization | **Next** | A dimension-aware thread/grid mapping experiment is selected |
 | Python interface | Planned | No binding implemented yet |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
@@ -39,7 +40,8 @@ Python reference
   → profiled and optimized serial C++
   → portable OpenMP multicore CPU
   → correctness-first CUDA C++  [complete]
-  → CUDA profiling/optimization [next]
+  → CUDA baseline profiling     [complete]
+  → CUDA optimization           [next]
   → Python interface            [planned]
 ```
 

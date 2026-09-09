@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, two isolated serial experiments, Windows multicore scaling, and first CUDA measurement are recorded below. CUDA profiling/optimization is next; Python bindings and native Phase B work are planned.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, two isolated serial experiments, Windows multicore scaling, first CUDA measurement, and CUDA baseline profile are recorded below. Evidence-led CUDA optimization is next; Python bindings and native Phase B work are planned.
 
 ## Performance boundary
 
@@ -216,7 +216,29 @@ The AC-powered Windows laptop used one untimed warm-up and three timed calls per
 | CUDA D2H | 107.876, 53.858, 122.051 | 53.858 / 107.876 / 122.051 | — |
 | CUDA total path | 177.542, 221.693, 275.530 | 177.542 / 221.693 / 275.530 | 213.034 Moutput/s |
 
-Kernel-only speedup was `70.593×` over optimized serial and `8.701×` over OpenMP; the transfer-inclusive path was `12.161×` and `1.499×`, respectively. Transfers occupied 76–86% of each measured total, so this baseline is transfer-sensitive for the canonical one-call workflow. The raw transfer and kernel spread also makes repetition and power-state control important. Architectural limitations are intentionally unresolved: every thread repeats coordinate decoding and reflection, reads nine global values without cooperative reuse, and transfers the full input and output for each call. CUDA profiling is the next step; it should quantify memory access efficiency, warp behavior/divergence, occupancy/register pressure, and the cost of index/reflection work before any optimization. Python bindings remain planned after the GPU path matures.
+Kernel-only speedup was `70.593×` over optimized serial and `8.701×` over OpenMP; the transfer-inclusive path was `12.161×` and `1.499×`, respectively. Transfers occupied 76–86% of each measured total, so this baseline is transfer-sensitive for the canonical one-call workflow. The raw transfer and kernel spread also makes repetition and power-state control important. Architectural limitations are intentionally unresolved: every thread repeats coordinate decoding and reflection, reads nine global values without cooperative reuse, and transfers the full input and output for each call. Python bindings remain planned after the GPU path matures.
+
+### Phase A CUDA baseline profile — 2026-09-09
+
+Nsight Compute 2025.2.1 profiled one post-warm-up canonical kernel launch from the unchanged CUDA 12.9, `sm_89` Release implementation. A focused Basic pass and targeted compute, memory, instruction, scheduler, warp-state, and source-counter sections used kernel replay; an otherwise identical ignored build added CUDA line information only for source attribution. Replay duration is not benchmark evidence, so the established unprofiled 38.191 ms kernel median remains the performance reference.
+
+| Metric | Result |
+| --- | ---: |
+| SM throughput / SM busy | 83.87% / 83.89% |
+| DRAM / peak-memory throughput | 40.57% / 41.80% |
+| Achieved occupancy | 95.57% (45.88 of 48 active warps/SM) |
+| Registers / local-memory traffic | 40 per thread / none |
+| L1/TEX / L2 hit rate | 8.38% / 89.24% |
+| Global-load / store sector use | 29.54 / 32.00 bytes per sector |
+| Scheduler cycles with no eligible warp | 70.16% |
+| Dominant sampled stalls | L1TEX throttle 56.01%; short scoreboard 26.19% |
+| Branch efficiency | 100.00% |
+
+The kernel is a mixed instruction/latency workload: its FP64 pipeline reached 83.9% utilization while nine-load dependency chains produced L1TEX queue pressure and short-scoreboard stalls. It is not primarily DRAM-bandwidth, occupancy/register, or divergence limited. Loads were already close to fully coalesced; 8,853,037 excess sectors were 7.0% of the measured total, and Nsight estimated only 1.883% improvement from ideal coalescing.
+
+Source attribution is intentionally conservative because inlined caller/callee rows overlap. The entry/decode region accounted for 123.97 million attributed warp instructions, reflection for 205.33 million, and the fused neighborhood address/load line for 159.39 million plus all excess sectors. Comparator-line samples were dominated by load-related stalls, so they cannot be interpreted as pure median-network time; the output store was fully coalesced and not a meaningful hotspot.
+
+Ranked optimization candidates are: (1) dimension-aware grid/thread mapping that removes repeated flat-index-to-4D decode and simplifies address generation while preserving detector-x coalescing; (2) mapping-aware scan-space shared-memory tiling to reduce the nine global loads and L1TEX dependency pressure; and (3) boundary specialization or precomputed reflection coordinates. The selected next isolated experiment is dimension-aware mapping because it is tractable, directly targets substantial integer/address work, and establishes the layout needed to evaluate tiling cleanly.
 
 ## Phase B — adaptive median performance target
 
@@ -301,8 +323,9 @@ Completed reference and organization work:
 - optimized-serial CPU reprofile showing median selection at 70.00% of relevant samples and selecting CPU parallelism as the next checkpoint.
 - portable OpenMP CPU implementation with exact fixture/canonical equivalence and a best measured `8.729×` speedup at 20 threads on the Windows laptop.
 - correctness-first CUDA baseline with exact fixture/canonical equivalence, separate event-based transfer/kernel timings, and a measured `1.499×` transfer-inclusive speedup over 20-thread OpenMP on the RTX 4070 Laptop GPU system.
+- focused Nsight Compute baseline profile identifying a mixed FP64-instruction and L1TEX/dependency-latency bottleneck and selecting dimension-aware thread/grid mapping as the next controlled experiment.
 
-Next/planned: CUDA profiling and evidence-led optimization, adaptive C++, Python bindings, and final cross-size performance claims.
+Next/planned: evidence-led CUDA optimization, adaptive C++, Python bindings, and final cross-size performance claims.
 
 ## Remaining TBDs
 
@@ -310,6 +333,6 @@ Next/planned: CUDA profiling and evidence-led optimization, adaptive C++, Python
 - Supported native dtypes and whether nondefault odd adaptive windows belong in the first implementation.
 - Linux/Lambda GCC-or-Clang OpenMP build validation and multicore scaling.
 - Native dtype expansion and allocation policy beyond the current `float64` fixed-filter path.
-- CUDA profiling, tiling/layout questions, transfer amortization, and CPU/GPU crossover studies.
+- CUDA tiling/layout experiments, transfer amortization, and CPU/GPU crossover studies.
 - Python binding technology and copy/ownership behavior.
 - Scientific validation on replacement datasets whose detector sampling differs from the current source.
