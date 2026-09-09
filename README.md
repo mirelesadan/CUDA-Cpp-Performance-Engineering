@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, optimized reprofiling, and portable OpenMP scaling.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, and a correctness-first CUDA baseline.
 
-CUDA C++, GPU profiling, Python bindings, the adaptive native implementation, and Projects 2–4 are roadmap work—not completed features.
+CUDA profiling and optimization are next. Python bindings, the adaptive native implementation, and Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -11,14 +11,15 @@ CUDA C++, GPU profiling, Python bindings, the adaptive native implementation, an
 | Python/4Denoise behavioral reference | Complete | Fixed and adaptive contracts documented in output-cleared notebooks |
 | Correctness-first C++17 fixed median | Complete | Exact finite-`float64` semantics and bitwise validation |
 | CPU profiling and serial optimization | Complete | Median-of-nine and direct-address experiments measured independently |
-| Portable multicore CPU | Complete | OpenMP implementation with static coarse-grained decomposition |
-| CUDA C++ and GPU optimization | **Next / planned** | No CUDA source or CUDA benchmark claim yet |
+| Portable OpenMP multicore | Complete | Static coarse-grained decomposition with measured Windows scaling |
+| Correctness-first CUDA baseline | Complete | Exact validation plus separate kernel and transfer-inclusive measurement |
+| CUDA profiling and optimization | **Next** | Baseline kernel awaits evidence-led profiling and optimization |
 | Python interface | Planned | No binding implemented yet |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
 
-The canonical workload contains 47,228,125 outputs with shape `(85, 35, 127, 125)`. All reported measurements below came from one Windows 11 laptop with an Intel Core i7-13700H (14 physical cores, 20 logical processors), MSVC x64 Release `/O2`, and internal output allocation included. They are machine-specific results, not universal performance claims.
+The canonical workload contains 47,228,125 outputs with shape `(85, 35, 127, 125)`. All reported measurements below came from one Windows 11 laptop with an Intel Core i7-13700H (14 physical cores, 20 logical processors) and an RTX 4070 Laptop GPU. CPU measurements used MSVC x64 Release `/O2` and included internal output allocation; CUDA values distinguish kernel execution from the H2D-plus-kernel-plus-D2H path. They are machine-specific results, not universal performance claims.
 
 - The original correctness-first C++ median was 3.756627 s.
 - Sampling identified general-purpose `std::nth_element` as the dominant original hotspot.
@@ -26,6 +27,7 @@ The canonical workload contains 47,228,125 outputs with shape `(85, 35, 127, 125
 - Direct reusable C-order addressing produced another measured `1.105×` speedup against its fresh median-of-nine baseline.
 - Reprofiling found selection still dominant at approximately 70% of relevant samples.
 - Static OpenMP decomposition reached 319.583 ms at 20 threads: `8.729×` versus the fresh 2.789567 s optimized-serial baseline and 147.781 million outputs/s.
+- The CUDA baseline matched all 47,228,125 canonical optimized-serial outputs bit for bit. Its kernel median was 38.191 ms and its transfer-inclusive median was 221.693 ms, versus 332.295 ms for OpenMP at 20 threads in the same measurement session. That is `70.593×` kernel-only speedup versus serial and `1.499×` transfer-inclusive speedup versus OpenMP-20.
 
 The optimized candidates matched the established Python and preceding C++ outputs bit for bit. Raw runs, benchmark boundaries, full scaling data, profiling caveats, and implementation progression are in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
 
@@ -36,8 +38,8 @@ Python reference
   → correctness-first C++17
   → profiled and optimized serial C++
   → portable OpenMP multicore CPU
-  → CUDA C++                    [next]
-  → CUDA profiling/optimization [planned]
+  → correctness-first CUDA C++  [complete]
+  → CUDA profiling/optimization [next]
   → Python interface            [planned]
 ```
 
@@ -47,7 +49,12 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
 
 ```text
 01_4DSTEM_Median_Filter_Acceleration/
-    cpp/                         C++17 serial/OpenMP source and CMake build
+    cpp/                         C++17 serial/OpenMP/CUDA source and CMake build
+        include/fixed_median_cuda.hpp
+                                 CUDA interface and timing result types
+        src/fixed_median_cuda.cu baseline CUDA kernel and checked runtime path
+        src/cuda_validation.cpp  exact fixture-validation executable
+        src/cuda_benchmark.cpp   serial/OpenMP/CUDA benchmark executable
     reference_data/public_synthetic/
                                  public deterministic correctness fixture
     benchmark_data/              instructions for local compatible inputs
@@ -61,7 +68,7 @@ ROADMAP.md                       staged development plan and completion state
 
 ## Build and validate the public fixture
 
-Requirements are CMake 3.24+, a C++17 compiler, and a compiler-supported OpenMP runtime.
+The default CPU build requires CMake 3.24+, a C++17 compiler, and a compiler-supported OpenMP runtime. CUDA targets are opt-in and additionally require a compatible CUDA toolkit.
 
 Windows with Visual Studio 2022:
 
@@ -80,6 +87,8 @@ cmake --build 01_4DSTEM_Median_Filter_Acceleration/cpp/build
 ```
 
 The default executable validates both optimized serial and OpenMP output against a small deterministic synthetic fixture. Linux compilation and scaling are intended portability targets but have not yet been verified on the planned Lambda environment.
+
+The separate `phase_a_cuda_validation` and `phase_a_cuda_benchmark` targets are enabled with `PHASE_A_ENABLE_CUDA=ON`; platform-specific CUDA configuration and reproduction commands are kept in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
 
 ## Benchmark with a local input
 
