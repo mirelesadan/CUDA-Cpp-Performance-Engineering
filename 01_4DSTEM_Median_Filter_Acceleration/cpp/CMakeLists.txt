@@ -83,3 +83,67 @@ if(MSVC AND PHASE_A_ENABLE_PROFILING_SYMBOLS)
             $<$<CONFIG:Release>:/OPT:ICF>
     )
 endif()
+
+# Keep the portable CPU-only build available by default. CUDA targets are
+# enabled explicitly on systems with a CUDA compiler and runtime.
+option(PHASE_A_ENABLE_CUDA "Build the correctness-first CUDA baseline targets" OFF)
+set(PHASE_A_CUDA_ARCHITECTURES "89" CACHE STRING
+    "CUDA architectures for Phase A targets (for example, 89 for Ada)"
+)
+
+if(PHASE_A_ENABLE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+
+    add_library(phase_a_cuda_baseline STATIC
+        src/fixed_median_cuda.cu
+    )
+    target_include_directories(phase_a_cuda_baseline
+        PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    target_link_libraries(phase_a_cuda_baseline PUBLIC CUDA::cudart)
+    set_target_properties(phase_a_cuda_baseline PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED YES
+        CUDA_EXTENSIONS NO
+        CUDA_ARCHITECTURES "${PHASE_A_CUDA_ARCHITECTURES}"
+    )
+
+    add_executable(phase_a_cuda_validation
+        src/cuda_validation.cpp
+        src/fixed_median.cpp
+    )
+    add_executable(phase_a_cuda_benchmark
+        src/cuda_benchmark.cpp
+        src/fixed_median.cpp
+    )
+
+    foreach(cuda_target IN ITEMS phase_a_cuda_validation phase_a_cuda_benchmark)
+        target_include_directories(${cuda_target}
+            PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libnpy/include"
+        )
+        target_link_libraries(${cuda_target}
+            PRIVATE
+                phase_a_cuda_baseline
+                OpenMP::OpenMP_CXX
+        )
+        set_target_properties(${cuda_target} PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED YES
+            CXX_EXTENSIONS NO
+        )
+    endforeach()
+
+    target_compile_definitions(phase_a_cuda_validation
+        PRIVATE
+            PHASE_A_REFERENCE_INPUT_PATH="${PHASE_A_REFERENCE_INPUT_PATH}"
+            PHASE_A_REFERENCE_OUTPUT_PATH="${PHASE_A_REFERENCE_OUTPUT_PATH}"
+    )
+    target_compile_definitions(phase_a_cuda_benchmark
+        PRIVATE
+            PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
+    )
+endif()

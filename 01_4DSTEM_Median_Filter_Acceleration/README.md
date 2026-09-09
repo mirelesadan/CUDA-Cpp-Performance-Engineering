@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial and OpenMP implementations. The full-input Release baseline, CPU profiles, two isolated serial experiments, and Windows multicore scaling are recorded below. CUDA, bindings, and native Phase B work have not begun.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, two isolated serial experiments, Windows multicore scaling, and first CUDA measurement are recorded below. CUDA profiling/optimization is next; Python bindings and native Phase B work are planned.
 
 ## Performance boundary
 
@@ -51,9 +51,13 @@ cpp/
     CMakeLists.txt
     include/
         fixed_median.hpp
+        fixed_median_cuda.hpp
     src/
+        cuda_benchmark.cpp
+        cuda_validation.cpp
         main.cpp
         fixed_median.cpp
+        fixed_median_cuda.cu
     third_party/
         libnpy/
             include/npy.hpp
@@ -64,7 +68,7 @@ cpp/
 
 `fixed_median.cpp` contains the correctness-first fixed `3 × 3` implementation: half-sample symmetric reflection on the two scan axes, nine-value median selection, and separate input/output storage. `main.cpp` loads and validates an input/reference pair and compares every `double` by its `uint64_t` bit representation. The public default is a deterministic synthetic fixture; alternate compatible arrays may be supplied explicitly. General shape is discovered at runtime.
 
-The only native dependencies are compiler-supported OpenMP and the vendored, header-only [libnpy](cpp/third_party/libnpy/README.md) `v1.0.1`, pinned to commit `890ea4fcda302a580e633c624c6a63e2a5d422f6` under its MIT license. CMake discovers OpenMP through its standard package target and embeds the source-tree public-fixture paths, so the default run does not depend on the working directory.
+The CPU targets depend only on compiler-supported OpenMP and the vendored, header-only [libnpy](cpp/third_party/libnpy/README.md) `v1.0.1`, pinned to commit `890ea4fcda302a580e633c624c6a63e2a5d422f6` under its MIT license. CUDA is opt-in through `PHASE_A_ENABLE_CUDA`; CMake then enables the CUDA language and links the standard `CUDA::cudart` target. The source-tree fixture paths are embedded, so default validation runs do not depend on the working directory.
 
 From a Visual Studio 2022 x64 Developer Command Prompt, configure and build with:
 
@@ -74,6 +78,17 @@ cmake --build cpp/build --config Debug
 cmake --build cpp/build --config Release
 cpp\build\Release\phase_a_fixed_median.exe
 ```
+
+On this Windows system, CUDA 12.9 is selected explicitly because its Visual Studio build-customization files are installed with the toolkit but not registered under the Visual Studio directory:
+
+```bat
+cmake -S cpp -B cpp/out/cuda -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPHASE_A_ENABLE_CUDA=ON -DPHASE_A_CUDA_ARCHITECTURES=89
+cmake --build cpp/out/cuda --config Release --target phase_a_cuda_validation phase_a_cuda_benchmark
+cpp\out\cuda\Release\phase_a_cuda_validation.exe
+cpp\out\cuda\Release\phase_a_cuda_benchmark.exe
+```
+
+Other installations with registered CUDA integration may omit the explicit `-T` selection; `PHASE_A_CUDA_ARCHITECTURES` remains overridable for other GPUs. No Visual Studio or toolkit installation was modified.
 
 CMake reads `CMakeLists.txt`, adds the project and libnpy include directories, applies the C++17 target requirements, and generates Visual Studio build files under `cpp/build/`. MSVC's `cl.exe` compiles the two source files; the linker combines their object files with the required runtime libraries to produce the executable. Debug favors diagnosis, while Release enables the toolchain's normal optimized configuration.
 
@@ -184,6 +199,25 @@ Each configuration received one untimed warm-up. Three filter-only timed calls f
 
 The one-thread OpenMP result is close to serial and slightly faster in this run, plausibly from compiler/code-layout effects and ordinary measurement variation rather than parallel work. Scaling is strong through four threads, remains useful at eight, and progressively flattens beyond eight; 16 to 20 threads improves the median by only 7.3%. Likely contributors are cache and memory-system pressure, scheduling overhead, and this hybrid CPU's logical-versus-physical-core topology. The measured 8.729× best speedup makes the OpenMP implementation worth retaining as the multicore CPU comparison before CUDA, but it is a single-laptop result. GCC/Clang build validation and scaling on Linux/Lambda remain future work.
 
+### Phase A correctness-first CUDA baseline — 2026-09-09
+
+The first CUDA implementation is deliberately direct: a one-dimensional grid assigns one output element to each thread, with 256 threads per block. Every thread decodes its C-order `(scan_y, scan_x, detector_y, detector_x)` coordinate, gathers the reflected `3 × 3` scan-space neighborhood at fixed detector coordinates, applies the same 19-comparator median-of-nine network, and writes a distinct output. It uses synchronous copies and no tiling, shared memory, streams, warp primitives, intrinsics, or other GPU optimization.
+
+CUDA 12.9.86, MSVC 19.44.35228, CMake 3.31.6, and x64 Release generated an `sm_89` binary for the RTX 4070 Laptop GPU (36 multiprocessors). The public 840-element deterministic fixture matched both its authoritative output and optimized serial C++ bit for bit. The canonical CUDA output likewise matched all 47,228,125 optimized-serial outputs bit for bit before timing.
+
+The AC-powered Windows laptop used one untimed warm-up and three timed calls per path. CPU times use `steady_clock` around the filter call and include output allocation. CUDA events measure synchronous H2D, kernel, and D2H stages; their sum excludes allocation, event setup, and file I/O. Component medians are calculated independently and therefore need not sum to the median of the per-run totals.
+
+| Path / stage | Raw runs (ms) | Min / median / max (ms) | Median output rate |
+| --- | --- | ---: | ---: |
+| Optimized serial CPU | 2696.036, 2677.485, 2761.642 | 2677.485 / 2696.036 / 2761.642 | 17.518 Moutput/s |
+| OpenMP CPU, 20 threads | 332.295, 318.777, 337.153 | 318.777 / 332.295 / 337.153 | 142.127 Moutput/s |
+| CUDA H2D | 33.045, 115.121, 115.287 | 33.045 / 115.121 / 115.287 | — |
+| CUDA kernel | 36.621, 52.715, 38.191 | 36.621 / 38.191 / 52.715 | 1236.620 Moutput/s |
+| CUDA D2H | 107.876, 53.858, 122.051 | 53.858 / 107.876 / 122.051 | — |
+| CUDA total path | 177.542, 221.693, 275.530 | 177.542 / 221.693 / 275.530 | 213.034 Moutput/s |
+
+Kernel-only speedup was `70.593×` over optimized serial and `8.701×` over OpenMP; the transfer-inclusive path was `12.161×` and `1.499×`, respectively. Transfers occupied 76–86% of each measured total, so this baseline is transfer-sensitive for the canonical one-call workflow. The raw transfer and kernel spread also makes repetition and power-state control important. Architectural limitations are intentionally unresolved: every thread repeats coordinate decoding and reflection, reads nine global values without cooperative reuse, and transfers the full input and output for each call. CUDA profiling is the next step; it should quantify memory access efficiency, warp behavior/divergence, occupancy/register pressure, and the cost of index/reflection work before any optimization. Python bindings remain planned after the GPU path matures.
+
 ## Phase B — adaptive median performance target
 
 Phase B preserves and will later accelerate the existing 4Denoise behavior:
@@ -266,8 +300,9 @@ Completed reference and organization work:
 - isolated direct-address serial optimization with exact fixture/canonical equivalence and a measured `1.105214×` median speedup over the fresh median-of-nine baseline.
 - optimized-serial CPU reprofile showing median selection at 70.00% of relevant samples and selecting CPU parallelism as the next checkpoint.
 - portable OpenMP CPU implementation with exact fixture/canonical equivalence and a best measured `8.729×` speedup at 20 threads on the Windows laptop.
+- correctness-first CUDA baseline with exact fixture/canonical equivalence, separate event-based transfer/kernel timings, and a measured `1.499×` transfer-inclusive speedup over 20-thread OpenMP on the RTX 4070 Laptop GPU system.
 
-Not started: adaptive C++, CUDA, bindings, and final performance claims.
+Next/planned: CUDA profiling and evidence-led optimization, adaptive C++, Python bindings, and final cross-size performance claims.
 
 ## Remaining TBDs
 
@@ -275,6 +310,6 @@ Not started: adaptive C++, CUDA, bindings, and final performance claims.
 - Supported native dtypes and whether nondefault odd adaptive windows belong in the first implementation.
 - Linux/Lambda GCC-or-Clang OpenMP build validation and multicore scaling.
 - Native dtype expansion and allocation policy beyond the current `float64` fixed-filter path.
-- CUDA mapping, tiling, layout/transposition, divergence, selection, transfer, and crossover studies.
+- CUDA profiling, tiling/layout questions, transfer amortization, and CPU/GPU crossover studies.
 - Python binding technology and copy/ownership behavior.
 - Scientific validation on replacement datasets whose detector sampling differs from the current source.

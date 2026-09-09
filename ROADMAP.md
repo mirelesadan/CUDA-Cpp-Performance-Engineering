@@ -106,6 +106,8 @@ The current optimized serial implementation was reprofiled on 2026-09-08 with lo
 
 Portable OpenMP CPU parallelism was completed on 2026-09-08 without changing the optimized scalar kernel. Static decomposition over independent contiguous `scan_y` slabs matched the frozen Python fixture and all 47,228,125 optimized-serial canonical outputs bit for bit. On the 14-core/20-logical-processor Windows laptop, the best median was 319.583 ms at 20 threads versus a fresh 2789.567 ms serial median: `8.729×` speedup and 147.781 Moutput/s. Scaling flattened beyond eight threads and the 16-to-20-thread gain was modest. The portable CPU path is retained; Linux/Lambda GCC-or-Clang validation remains future work, and the next Phase A implementation step is the first CUDA kernel.
 
+The correctness-first CUDA baseline was completed on 2026-09-09 as a separate, unoptimized one-output-per-thread kernel with 256-thread one-dimensional blocks. It preserves the C-order layout, reflect boundaries, `float64` data, and fixed median-of-nine semantics. The public 840-element fixture and all 47,228,125 canonical outputs matched bit for bit. On the AC-powered RTX 4070 Laptop GPU system, CUDA-event medians were 115.121 ms H2D, 38.191 ms kernel, 107.876 ms D2H, and 221.693 ms for the median per-run transfer-inclusive total; independently computed component medians do not sum to the total median. Fresh CPU medians were 2696.036 ms serial and 332.295 ms at 20 OpenMP threads, making the measured CUDA total `12.161×` faster than serial and `1.499×` faster than OpenMP. Transfers accounted for 76–86% of each total run. CUDA profiling is next; optimization and Python bindings remain planned.
+
 ### Phase B — adaptive median performance target
 
 Phase B reproduces the current 4Denoise adaptive algorithm with `s=3` and `sMax=7`. The source performs nested Python pixel loops, strict two-stage min/median/max decisions, and conditional window growth with per-plane global-minimum constant padding. Initial profiling on bounded prepared subsets established repeated per-pixel neighborhood statistics as the dominant Python cost. Exact subset shapes and timings are runtime results recorded in the executed notebook, not permanent project claims.
@@ -223,9 +225,11 @@ All projects currently live in this public parent portfolio, and future work sho
 - [x] Complete isolated serial experiment 2: reduce flat-address generation
 - [x] Reprofile the current optimized serial implementation
 - [x] Implement and measure portable OpenMP CPU parallelism
-- [ ] Implement the first CUDA kernel
-- [ ] Validate and profile CUDA
+- [x] Implement and exactly validate the first correctness-first CUDA kernel
+- [x] Record separate CUDA transfer, kernel, and total-path baseline timings
+- [ ] Profile the CUDA baseline
 - [ ] Perform basic CUDA optimization
+- [ ] Add a Python binding after the CUDA path matures
 
 #### Phase B — Adaptive Median
 
