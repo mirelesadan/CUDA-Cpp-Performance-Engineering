@@ -297,18 +297,33 @@ int main(int argc, char* argv[])
         validate_matching_arrays(input, reference);
 
         const phase_a::Dimensions4D dimensions = dimensions_from_shape(input.array.shape);
-        const std::vector<double> serial_output =
+        const std::vector<double> input_before = input.array.data;
+        const std::vector<double> baseline_output =
+            phase_a::fixed_median_3x3(input.array.data, dimensions);
+        const std::vector<double> median9_output =
+            phase_a::fixed_median_3x3_median9(input.array.data, dimensions);
+        const std::vector<double> optimized_serial_output =
             phase_a::fixed_median_3x3_median9_direct_addressing(input.array.data, dimensions);
         const int openmp_threads =
             std::max(1, std::min(phase_a::openmp_max_threads(), phase_a::openmp_processor_count()));
-        const std::vector<double> output =
+        const std::vector<double> openmp_output =
             phase_a::fixed_median_3x3_median9_direct_addressing_openmp(
                 input.array.data, dimensions, openmp_threads);
-        const ComparisonSummary comparison = compare_bitwise(output, reference.array.data);
-        const ComparisonSummary serial_openmp_comparison = compare_bitwise(output, serial_output);
+        const ComparisonSummary baseline_comparison =
+            compare_bitwise(baseline_output, reference.array.data);
+        const ComparisonSummary median9_comparison =
+            compare_bitwise(median9_output, reference.array.data);
+        const ComparisonSummary optimized_serial_comparison =
+            compare_bitwise(optimized_serial_output, reference.array.data);
+        const ComparisonSummary openmp_comparison =
+            compare_bitwise(openmp_output, reference.array.data);
+        const ComparisonSummary serial_openmp_comparison =
+            compare_bitwise(openmp_output, optimized_serial_output);
+        const ComparisonSummary input_comparison =
+            compare_bitwise(input.array.data, input_before);
 
         std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
-        std::cout << "Project 1 - Phase A portable OpenMP validation\n"
+        std::cout << "Project 1 - Phase A consolidated CPU validation\n"
                   << "Input path: " << input_path.string() << '\n'
                   << "Reference path: " << reference_path.string() << '\n'
                   << "Dtype: " << input.dtype << " (float64)\n"
@@ -346,36 +361,49 @@ int main(int argc, char* argv[])
         };
 
         std::cout << "Output sanity checks:\n";
-        print_output_check("top/left boundary", top_left, dimensions, output, reference.array.data);
-        print_output_check("interior", interior, dimensions, output, reference.array.data);
-        print_output_check("bottom/right boundary", bottom_right, dimensions, output, reference.array.data);
+        print_output_check("top/left boundary", top_left, dimensions, openmp_output, reference.array.data);
+        print_output_check("interior", interior, dimensions, openmp_output, reference.array.data);
+        print_output_check("bottom/right boundary", bottom_right, dimensions, openmp_output, reference.array.data);
 
         std::cout << "Bitwise validation:\n"
-                  << "  Elements compared: " << output.size() << '\n'
-                  << "  Bitwise mismatches: " << comparison.mismatch_count << '\n'
+                  << "  Elements compared per implementation: " << openmp_output.size() << '\n'
+                  << "  Straightforward baseline-vs-reference mismatches: "
+                  << baseline_comparison.mismatch_count << '\n'
+                  << "  Median-of-nine-vs-reference mismatches: "
+                  << median9_comparison.mismatch_count << '\n'
+                  << "  Optimized serial-vs-reference mismatches: "
+                  << optimized_serial_comparison.mismatch_count << '\n'
+                  << "  OpenMP-vs-reference mismatches: "
+                  << openmp_comparison.mismatch_count << '\n'
                   << "  Optimized serial-vs-OpenMP mismatches: "
                   << serial_openmp_comparison.mismatch_count << '\n'
-                  << "  Maximum absolute difference: " << comparison.maximum_absolute_difference << '\n';
+                  << "  Input-after-filter mismatches: "
+                  << input_comparison.mismatch_count << '\n'
+                  << "  Maximum OpenMP-vs-reference absolute difference: "
+                  << openmp_comparison.maximum_absolute_difference << '\n';
 
-        if (comparison.has_first_mismatch) {
+        if (openmp_comparison.has_first_mismatch) {
             const std::array<std::size_t, 4> coordinate =
-                coordinate_from_flat_index(comparison.first_mismatch_index, dimensions);
+                coordinate_from_flat_index(openmp_comparison.first_mismatch_index, dimensions);
 
             std::cout << "  First mismatch coordinate: (" << coordinate[0] << ", " << coordinate[1] << ", "
                       << coordinate[2] << ", " << coordinate[3] << ")\n"
-                      << "  First mismatch flat index: " << comparison.first_mismatch_index << '\n'
-                      << "  C++ value: " << comparison.first_actual_value << " ("
-                      << bits_as_hex(comparison.first_actual_bits) << ")\n"
-                      << "  Python value: " << comparison.first_expected_value << " ("
-                      << bits_as_hex(comparison.first_expected_bits) << ")\n"
+                      << "  First mismatch flat index: " << openmp_comparison.first_mismatch_index << '\n'
+                      << "  C++ value: " << openmp_comparison.first_actual_value << " ("
+                      << bits_as_hex(openmp_comparison.first_actual_bits) << ")\n"
+                      << "  Python value: " << openmp_comparison.first_expected_value << " ("
+                      << bits_as_hex(openmp_comparison.first_expected_bits) << ")\n"
                       << "  On scan boundary: " << (is_scan_boundary(coordinate, dimensions) ? "yes" : "no") << '\n'
                       << "Validation result: FAIL\n";
             return 1;
         }
 
-        if (serial_openmp_comparison.mismatch_count != 0) {
-            std::cout << "  First Python-reference mismatch: none\n"
-                      << "Validation result: FAIL (serial-vs-OpenMP mismatch)\n";
+        if (baseline_comparison.mismatch_count != 0 ||
+            median9_comparison.mismatch_count != 0 ||
+            optimized_serial_comparison.mismatch_count != 0 ||
+            serial_openmp_comparison.mismatch_count != 0 ||
+            input_comparison.mismatch_count != 0) {
+            std::cout << "Validation result: FAIL (consolidated implementation mismatch)\n";
             return 1;
         }
 

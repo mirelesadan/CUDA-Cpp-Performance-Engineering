@@ -43,6 +43,9 @@ cmake_install.cmake
 *.vspx
 *.diagsession
 *.trace
+*.ncu-rep
+*.nsys-rep
+*.qdrep
 *.log
 *.tmp
 *.temp

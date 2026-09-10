@@ -22,6 +22,12 @@ Source loading, center alignment, ellipse fitting, and elliptical correction are
 
 The general array contract is `(scan_y, scan_x, detector_y, detector_x)`. Numerical dimensions are discovered at runtime. Project 1 is not tied to one experimental array shape.
 
+## Phase A closeout summary
+
+Phase A is complete. The authoritative progression is the 3.756627 s straightforward C++ baseline; CPU profiles that motivated isolated `1.135×` median-of-nine and `1.105×` direct-address improvements against fresh same-session baselines; a 319.583 ms OpenMP-20 median (`8.729×` versus its fresh optimized-serial baseline); and an exact CUDA baseline with a stabilized 6.888448 ms kernel median. Nsight Compute classified that kernel as mixed instruction/latency limited. Dimension-aware mapping, shared-memory tiling, and an interior reflection fast path were tested exactly and discarded when measurements did not justify their complexity.
+
+The native transfer study measured a 99.865630 ms pageable one-call median and 17.083 ms/filter across ten resident operations. These are distinct from Python wall-time results: direct NumPy buffers improved copied serial and OpenMP-20 binding medians by `1.096774×` and `1.658099×`, while `CudaMedianBuffer` reduced effective time from a 0.835481 s copied one-shot median to 0.043582 s/filter across ten resident calls (`19.170×`) in its variable pageable-transfer session, with approximately 6.59 ms/kernel. Historical sparse-invocation CUDA values, including the initial 38.191 ms kernel median, remain documented below but are not the steady-state optimization baseline. Public and canonical correctness evidence is bit-for-bit under the finite-`float64` contract.
+
 ## Phase A — fixed `3 × 3` median warm-up
 
 Phase A applies a centered `3 × 3` median over scan axes 0 and 1, independently for every detector coordinate, through:
@@ -234,7 +240,7 @@ The AC-powered Windows laptop used one untimed warm-up and three timed calls per
 | CUDA D2H | 107.876, 53.858, 122.051 | 53.858 / 107.876 / 122.051 | — |
 | CUDA total path | 177.542, 221.693, 275.530 | 177.542 / 221.693 / 275.530 | 213.034 Moutput/s |
 
-In this original sparse-invocation session, kernel-only speedup was `70.593×` over optimized serial and `8.701×` over OpenMP; the transfer-inclusive path was `12.161×` and `1.499×`, respectively. Transfers occupied 76–86% of each measured total, so this baseline is transfer-sensitive for the canonical one-call workflow. These raw historical results are preserved, but the later timing audit below supersedes 38.191 ms as the baseline for isolated kernel optimization. Architectural limitations are intentionally unresolved: every thread repeats coordinate decoding and reflection, reads nine global values without cooperative reuse, and transfers the full input and output for each call. Python bindings remain planned after the GPU path matures.
+In this original sparse-invocation session, kernel-only speedup was `70.593×` over optimized serial and `8.701×` over OpenMP; the transfer-inclusive path was `12.161×` and `1.499×`, respectively. Transfers occupied 76–86% of each measured total, so this baseline is transfer-sensitive for the canonical one-call workflow. These raw historical results are preserved, but the later timing audit below supersedes 38.191 ms as the baseline for isolated kernel optimization. At this milestone, every thread repeated coordinate decoding and reflection, read nine global values without cooperative reuse, and the one-shot path transferred the full input and output per call. The later sections record the CUDA experiments and completed Python bindings, including persistent device ownership.
 
 ### Phase A CUDA baseline profile — 2026-09-09
 
@@ -371,7 +377,7 @@ One warm-up per path preceded five alternating-order Python-call trials on the s
 
 Removing the two copies saved approximately 0.523 s for serial and 0.512 s for OpenMP, reducing median call time by 8.82% and 39.69%, respectively. The retained finite-value scan had a 0.158454 s median (`0.126317 / 0.158454 / 0.167888` s min/median/max), about 2.9% of direct serial time but 20.4% of direct OpenMP time; it is now meaningful for the parallel path but remains required by the public contract.
 
-A fresh three-run native vector-API check measured `4.062016 / 5.218265 / 7.737714` s serial and `0.794332 / 0.827192 / 2.335497` s OpenMP-20 at min/median/max. The direct Python medians were within 3.5% of the native serial median and 6.0% below the variable native OpenMP median, so no stable residual binding penalty beyond validation/output ownership is established. The direct CPU architecture is retained; explicit persistent CUDA ownership is the next Python-interface experiment.
+A fresh three-run native vector-API check measured `4.062016 / 5.218265 / 7.737714` s serial and `0.794332 / 0.827192 / 2.335497` s OpenMP-20 at min/median/max. The direct Python medians were within 3.5% of the native serial median and 6.0% below the variable native OpenMP median, so no stable residual binding penalty beyond validation/output ownership is established. The direct CPU architecture is retained; the following section records the subsequently completed persistent CUDA experiment.
 
 ### Phase A persistent CUDA Python ownership — 2026-09-10
 
@@ -456,9 +462,9 @@ For authorized local scientific work, place the experimental source outside vers
 6. reloads it and checks shape, dtype, contiguity, finite values, and bit-for-bit identity;
 7. updates the ignored local dataset manifest with current metadata and hashes.
 
-## Planned engineering progression
+## Engineering progression
 
-Phase A remains the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
+Phase A completed the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
 
 Phase B is the main progression: reproduce the exact adaptive contract in clear C++, validate it, profile and optimize CPU behavior, implement and profile CUDA, optimize from evidence, integrate with Python, and report a reproducible benchmark matrix.
 
@@ -485,8 +491,12 @@ Completed reference and organization work:
 - CUDA timing audit establishing a reusable-buffer 20-launch kernel protocol and a 6.888448 ms steady-state baseline; the correct dimension-aware mapping candidate produced no measurable speedup and was discarded.
 - CUDA optimization checkpoint completing three exact isolated experiments: dimension-aware mapping was neutral, shared-memory tiling regressed approximately 1.3%, and the reflection fast path gained only 0.635% within variability; all candidates were discarded.
 - CUDA transfer/residency characterization establishing a 99.865630 ms pageable one-call median, `3.370×` speedup over fresh OpenMP-20, material pinned-transfer benefit, and a directional 4.1–10 million-output CPU/GPU crossover bracket.
+- pybind11 serial/OpenMP/optional-CUDA bindings with strict finite, four-dimensional, C-contiguous `float64` validation and exact public/canonical results.
+- direct NumPy-buffer CPU/OpenMP paths that removed the two intermediate vector copies and improved copied binding medians by `1.096774×` and `1.658099×`, respectively.
+- non-copyable `CudaMedianBuffer` RAII ownership with unchanged-kernel, original-input repeated-call semantics and a measured `19.170×` effective ten-operation speedup over repeated copied one-shot Python calls.
+- final public validation covering the regenerated Python reference, retained serial variants, OpenMP, one-shot CUDA, direct Python CPU paths, and persistent CUDA ownership.
 
-Next/planned: design and implement the Phase A Python interface around explicit device residency, then continue native Phase B work and broader cross-platform validation.
+Phase A status: **complete**. Next: implement and exactly validate a straightforward native C++ Phase B adaptive median against the established Python contract before profiling, optimization, or CUDA work.
 
 ## Remaining TBDs
 
@@ -494,5 +504,5 @@ Next/planned: design and implement the Phase A Python interface around explicit 
 - Supported native dtypes and whether nondefault odd adaptive windows belong in the first implementation.
 - Linux/Lambda GCC-or-Clang OpenMP build validation and multicore scaling.
 - Native dtype expansion and allocation policy beyond the current `float64` fixed-filter path.
-- Python binding technology, CUDA-array interoperability, and precise copy/ownership behavior.
+- CUDA-array interoperability and any asynchronous or multi-GPU design remain outside the Phase A interface scope.
 - Scientific validation on replacement datasets whose detector sampling differs from the current source.
