@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and correctness-first Python interface are recorded below. Direct-buffer and persistent-device Python experiments remain future work; native Phase B is also planned.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings now use direct validated NumPy buffers; persistent-device Python ownership and native Phase B remain planned.
 
 ## Performance boundary
 
@@ -350,7 +350,28 @@ One warm-up and three Python-call wall-time trials produced:
 | OpenMP, 20 threads | 2.400907, 2.306518, 2.392543 | 2.306518 / 2.392543 / 2.400907 |
 | One-shot CUDA | 1.059146, 1.192683, 1.118562 | 1.059146 / 1.118562 / 1.192683 |
 
-These are interface-level baselines, not replacements for the established native and kernel timings. They include both host-vector copies; CUDA also includes one-shot native allocation and H2D/D2H transfers. CPU performance in this session was substantially slower than earlier milestone sessions—a same-session native serial check measured 9.909451 s—so the full historical difference cannot be attributed to binding copies. The next isolated interface experiment should remove NumPy-to-vector and vector-to-NumPy copies through validated direct-buffer native entry points; persistent CUDA ownership should follow once the host boundary is measured cleanly.
+These are interface-level baselines, not replacements for the established native and kernel timings. They include both host-vector copies; CUDA also includes one-shot native allocation and H2D/D2H transfers. CPU performance in this session was substantially slower than earlier milestone sessions—a same-session native serial check measured 9.909451 s—so the full historical difference cannot be attributed to binding copies. The following isolated experiment measures removal of the CPU host-vector copies directly.
+
+### Phase A direct NumPy-buffer CPU bindings — 2026-09-10
+
+New caller-owned-buffer C++ entry points accept separate `const double*` input and `double*` output storage. The existing vector-returning serial and OpenMP APIs remain callable and delegate to the same factored scan-`y` slab computational core, preserving the direct addressing, reflection, loop order, 19-comparator median, and static OpenMP decomposition without duplicating the algorithm.
+
+The normal Python serial and OpenMP functions now validate the NumPy metadata and finite values, allocate a new same-shape NumPy output, capture both pointers with the GIL held, and release the GIL only while the buffer API runs. Both Python owners remain alive throughout the native call. No NumPy/vector copies occur. The CUDA function is unchanged and still follows `NumPy → vector → one-shot CUDA allocation/H2D/kernel/D2H → vector → NumPy`.
+
+The public 840-element direct serial and OpenMP results matched the expected output bit for bit; input immutability, independent output ownership, and all invalid-input checks still passed. On the canonical workload, both direct paths matched the existing vector paths across all 47,228,125 outputs bit for bit. Private copied CPU functions were exposed only with `PHASE_A_ENABLE_PYTHON_COPY_BENCHMARK=ON` for this experiment and are absent from the normal module.
+
+One warm-up per path preceded five alternating-order Python-call trials on the same input and in the same session:
+
+| Python path | Raw calls (s) | Min / median / max (s) | Direct speedup |
+| --- | --- | ---: | ---: |
+| Copied serial | 5.762266, 5.769502, 6.629529, 5.922454, 6.187763 | 5.762266 / 5.922454 / 6.629529 | — |
+| Direct serial | 5.399885, 5.333842, 5.293833, 5.942240, 5.617023 | 5.293833 / 5.399885 / 5.942240 | `1.096774×` |
+| Copied OpenMP-20 | 1.223860, 1.312665, 1.486077, 1.289512, 1.266270 | 1.223860 / 1.289512 / 1.486077 | — |
+| Direct OpenMP-20 | 0.777705, 0.753084, 0.689113, 0.863709, 0.910947 | 0.689113 / 0.777705 / 0.910947 | `1.658099×` |
+
+Removing the two copies saved approximately 0.523 s for serial and 0.512 s for OpenMP, reducing median call time by 8.82% and 39.69%, respectively. The retained finite-value scan had a 0.158454 s median (`0.126317 / 0.158454 / 0.167888` s min/median/max), about 2.9% of direct serial time but 20.4% of direct OpenMP time; it is now meaningful for the parallel path but remains required by the public contract.
+
+A fresh three-run native vector-API check measured `4.062016 / 5.218265 / 7.737714` s serial and `0.794332 / 0.827192 / 2.335497` s OpenMP-20 at min/median/max. The direct Python medians were within 3.5% of the native serial median and 6.0% below the variable native OpenMP median, so no stable residual binding penalty beyond validation/output ownership is established. The direct CPU architecture is retained; explicit persistent CUDA ownership is the next Python-interface experiment.
 
 ## Phase B — adaptive median performance target
 

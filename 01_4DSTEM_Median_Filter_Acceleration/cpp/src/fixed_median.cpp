@@ -205,64 +205,116 @@ std::vector<double> fixed_median_3x3_median9(
     return fixed_median_3x3_impl(input, dimensions, MedianOfNine{});
 }
 
-std::vector<double> fixed_median_3x3_median9_direct_addressing(
-    const std::vector<double>& input,
-    const Dimensions4D& dimensions)
+namespace {
+
+std::size_t validate_direct_addressing_dimensions(const Dimensions4D& dimensions)
 {
     const std::size_t element_count = checked_element_count(dimensions);
-    if (input.size() != element_count) {
-        throw std::invalid_argument("Input element count does not match the supplied 4D dimensions.");
-    }
     if (dimensions.scan_y > static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) ||
         dimensions.scan_x > static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
         throw std::overflow_error("Scan dimensions are too large for reflected indexing.");
     }
+    return element_count;
+}
+
+void validate_direct_addressing_buffers(
+    const double* input,
+    double* output,
+    const Dimensions4D& dimensions)
+{
+    static_cast<void>(validate_direct_addressing_dimensions(dimensions));
+    if (input == nullptr || output == nullptr) {
+        throw std::invalid_argument("Fixed median input and output buffers must be non-null.");
+    }
+    if (input == output) {
+        throw std::invalid_argument("Fixed median input and output buffers must not overlap.");
+    }
+}
+
+void fixed_median_3x3_direct_addressing_scan_y(
+    const double* input,
+    double* output,
+    const Dimensions4D& dimensions,
+    std::size_t detector_plane_stride,
+    std::size_t scan_y_stride,
+    std::size_t scan_y)
+{
+    const std::size_t output_scan_y_base = scan_y * scan_y_stride;
+
+    for (std::size_t scan_x = 0; scan_x < dimensions.scan_x; ++scan_x) {
+        const std::size_t output_scan_base =
+            output_scan_y_base + scan_x * detector_plane_stride;
+
+        for (std::size_t detector_y = 0; detector_y < dimensions.detector_y; ++detector_y) {
+            const std::size_t detector_row_base = detector_y * dimensions.detector_x;
+
+            for (std::size_t detector_x = 0; detector_x < dimensions.detector_x; ++detector_x) {
+                const std::size_t detector_offset = detector_row_base + detector_x;
+                std::array<double, 9> neighborhood{};
+                std::size_t neighborhood_index = 0;
+
+                for (std::ptrdiff_t offset_y = -1; offset_y <= 1; ++offset_y) {
+                    const std::size_t reflected_y = reflect_index(
+                        static_cast<std::ptrdiff_t>(scan_y) + offset_y,
+                        dimensions.scan_y);
+                    const std::size_t reflected_scan_y_base = reflected_y * scan_y_stride;
+
+                    for (std::ptrdiff_t offset_x = -1; offset_x <= 1; ++offset_x) {
+                        const std::size_t reflected_x = reflect_index(
+                            static_cast<std::ptrdiff_t>(scan_x) + offset_x,
+                            dimensions.scan_x);
+                        const std::size_t input_scan_base =
+                            reflected_scan_y_base + reflected_x * detector_plane_stride;
+
+                        neighborhood[neighborhood_index] = input[input_scan_base + detector_offset];
+                        ++neighborhood_index;
+                    }
+                }
+
+                output[output_scan_base + detector_offset] = MedianOfNine{}(neighborhood);
+            }
+        }
+    }
+}
+
+} // namespace
+
+std::vector<double> fixed_median_3x3_median9_direct_addressing(
+    const std::vector<double>& input,
+    const Dimensions4D& dimensions)
+{
+    const std::size_t element_count = validate_direct_addressing_dimensions(dimensions);
+    if (input.size() != element_count) {
+        throw std::invalid_argument("Input element count does not match the supplied 4D dimensions.");
+    }
 
     std::vector<double> output(element_count);
+    fixed_median_3x3_median9_direct_addressing_buffer(
+        input.data(),
+        output.data(),
+        dimensions);
+    return output;
+}
+
+void fixed_median_3x3_median9_direct_addressing_buffer(
+    const double* input,
+    double* output,
+    const Dimensions4D& dimensions)
+{
+    validate_direct_addressing_buffers(input, output, dimensions);
 
     const std::size_t detector_plane_stride = dimensions.detector_y * dimensions.detector_x;
     const std::size_t scan_y_stride = dimensions.scan_x * detector_plane_stride;
 
     for (std::size_t scan_y = 0; scan_y < dimensions.scan_y; ++scan_y) {
-        const std::size_t output_scan_y_base = scan_y * scan_y_stride;
-
-        for (std::size_t scan_x = 0; scan_x < dimensions.scan_x; ++scan_x) {
-            const std::size_t output_scan_base =
-                output_scan_y_base + scan_x * detector_plane_stride;
-
-            for (std::size_t detector_y = 0; detector_y < dimensions.detector_y; ++detector_y) {
-                const std::size_t detector_row_base = detector_y * dimensions.detector_x;
-
-                for (std::size_t detector_x = 0; detector_x < dimensions.detector_x; ++detector_x) {
-                    const std::size_t detector_offset = detector_row_base + detector_x;
-                    std::array<double, 9> neighborhood{};
-                    std::size_t neighborhood_index = 0;
-
-                    for (std::ptrdiff_t offset_y = -1; offset_y <= 1; ++offset_y) {
-                        const std::size_t reflected_y = reflect_index(
-                            static_cast<std::ptrdiff_t>(scan_y) + offset_y,
-                            dimensions.scan_y);
-                        const std::size_t reflected_scan_y_base = reflected_y * scan_y_stride;
-
-                        for (std::ptrdiff_t offset_x = -1; offset_x <= 1; ++offset_x) {
-                            const std::size_t reflected_x = reflect_index(
-                                static_cast<std::ptrdiff_t>(scan_x) + offset_x,
-                                dimensions.scan_x);
-                            const std::size_t input_scan_base =
-                                reflected_scan_y_base + reflected_x * detector_plane_stride;
-
-                            neighborhood[neighborhood_index] = input[input_scan_base + detector_offset];
-                            ++neighborhood_index;
-                        }
-                    }
-
-                    output[output_scan_base + detector_offset] = MedianOfNine{}(neighborhood);
-                }
-            }
-        }
+        fixed_median_3x3_direct_addressing_scan_y(
+            input,
+            output,
+            dimensions,
+            detector_plane_stride,
+            scan_y_stride,
+            scan_y);
     }
-
-    return output;
 }
 
 int openmp_max_threads()
@@ -280,19 +332,33 @@ std::vector<double> fixed_median_3x3_median9_direct_addressing_openmp(
     const Dimensions4D& dimensions,
     int thread_count)
 {
-    const std::size_t element_count = checked_element_count(dimensions);
+    const std::size_t element_count = validate_direct_addressing_dimensions(dimensions);
     if (input.size() != element_count) {
         throw std::invalid_argument("Input element count does not match the supplied 4D dimensions.");
-    }
-    if (dimensions.scan_y > static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) ||
-        dimensions.scan_x > static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
-        throw std::overflow_error("Scan dimensions are too large for reflected indexing.");
     }
     if (thread_count < 1) {
         throw std::invalid_argument("OpenMP thread count must be positive.");
     }
 
     std::vector<double> output(element_count);
+    fixed_median_3x3_median9_direct_addressing_openmp_buffer(
+        input.data(),
+        output.data(),
+        dimensions,
+        thread_count);
+    return output;
+}
+
+void fixed_median_3x3_median9_direct_addressing_openmp_buffer(
+    const double* input,
+    double* output,
+    const Dimensions4D& dimensions,
+    int thread_count)
+{
+    validate_direct_addressing_buffers(input, output, dimensions);
+    if (thread_count < 1) {
+        throw std::invalid_argument("OpenMP thread count must be positive.");
+    }
 
     const std::size_t detector_plane_stride = dimensions.detector_y * dimensions.detector_x;
     const std::size_t scan_y_stride = dimensions.scan_x * detector_plane_stride;
@@ -304,45 +370,14 @@ std::vector<double> fixed_median_3x3_median9_direct_addressing_openmp(
          scan_y_signed < static_cast<std::ptrdiff_t>(dimensions.scan_y);
          ++scan_y_signed) {
         const std::size_t scan_y = static_cast<std::size_t>(scan_y_signed);
-        const std::size_t output_scan_y_base = scan_y * scan_y_stride;
-
-        for (std::size_t scan_x = 0; scan_x < dimensions.scan_x; ++scan_x) {
-            const std::size_t output_scan_base =
-                output_scan_y_base + scan_x * detector_plane_stride;
-
-            for (std::size_t detector_y = 0; detector_y < dimensions.detector_y; ++detector_y) {
-                const std::size_t detector_row_base = detector_y * dimensions.detector_x;
-
-                for (std::size_t detector_x = 0; detector_x < dimensions.detector_x; ++detector_x) {
-                    const std::size_t detector_offset = detector_row_base + detector_x;
-                    std::array<double, 9> neighborhood{};
-                    std::size_t neighborhood_index = 0;
-
-                    for (std::ptrdiff_t offset_y = -1; offset_y <= 1; ++offset_y) {
-                        const std::size_t reflected_y = reflect_index(
-                            static_cast<std::ptrdiff_t>(scan_y) + offset_y,
-                            dimensions.scan_y);
-                        const std::size_t reflected_scan_y_base = reflected_y * scan_y_stride;
-
-                        for (std::ptrdiff_t offset_x = -1; offset_x <= 1; ++offset_x) {
-                            const std::size_t reflected_x = reflect_index(
-                                static_cast<std::ptrdiff_t>(scan_x) + offset_x,
-                                dimensions.scan_x);
-                            const std::size_t input_scan_base =
-                                reflected_scan_y_base + reflected_x * detector_plane_stride;
-
-                            neighborhood[neighborhood_index] = input[input_scan_base + detector_offset];
-                            ++neighborhood_index;
-                        }
-                    }
-
-                    output[output_scan_base + detector_offset] = MedianOfNine{}(neighborhood);
-                }
-            }
-        }
+        fixed_median_3x3_direct_addressing_scan_y(
+            input,
+            output,
+            dimensions,
+            detector_plane_stride,
+            scan_y_stride,
+            scan_y);
     }
-
-    return output;
 }
 
 } // namespace phase_a

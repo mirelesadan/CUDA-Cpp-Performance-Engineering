@@ -33,12 +33,25 @@ std::vector<double> fixed_median_3x3_median9_direct_addressing(
     const std::vector<double>& input,
     const Dimensions4D& dimensions);
 
+// The caller owns both buffers. They must each contain the complete shape,
+// must not overlap, and remain valid for the duration of the call.
+void fixed_median_3x3_median9_direct_addressing_buffer(
+    const double* input,
+    double* output,
+    const Dimensions4D& dimensions);
+
 int openmp_max_threads();
 
 int openmp_processor_count();
 
 std::vector<double> fixed_median_3x3_median9_direct_addressing_openmp(
     const std::vector<double>& input,
+    const Dimensions4D& dimensions,
+    int thread_count);
+
+void fixed_median_3x3_median9_direct_addressing_openmp_buffer(
+    const double* input,
+    double* output,
     const Dimensions4D& dimensions,
     int thread_count);
 

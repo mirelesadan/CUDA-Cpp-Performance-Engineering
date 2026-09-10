@@ -88,6 +88,9 @@ endif()
 # enabled explicitly on systems with a CUDA compiler and runtime.
 option(PHASE_A_ENABLE_CUDA "Build the correctness-first CUDA baseline targets" OFF)
 option(PHASE_A_ENABLE_PYTHON "Build the correctness-first pybind11 Python module" OFF)
+option(PHASE_A_ENABLE_PYTHON_COPY_BENCHMARK
+    "Expose private copied CPU paths for the Python interface experiment" OFF
+)
 set(PHASE_A_CUDA_ARCHITECTURES "89" CACHE STRING
     "CUDA architectures for Phase A targets (for example, 89 for Ada)"
 )
@@ -207,6 +210,12 @@ if(PHASE_A_ENABLE_PYTHON)
         CXX_STANDARD_REQUIRED YES
         CXX_EXTENSIONS NO
     )
+
+    if(PHASE_A_ENABLE_PYTHON_COPY_BENCHMARK)
+        target_compile_definitions(fourdstem_median
+            PRIVATE PHASE_A_PYTHON_COPY_BENCHMARK=1
+        )
+    endif()
 
     if(PHASE_A_ENABLE_CUDA)
         target_link_libraries(fourdstem_median PRIVATE phase_a_cuda_baseline)

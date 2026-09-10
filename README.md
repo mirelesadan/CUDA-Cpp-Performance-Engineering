@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, a profiled correctness-first CUDA baseline, controlled CUDA experiments, transfer/residency characterization, and an exact pybind11 interface baseline.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, a profiled correctness-first CUDA baseline, controlled CUDA experiments, transfer/residency characterization, and exact pybind11 bindings with direct NumPy-buffer CPU execution.
 
-Phase A Python-interface optimization is next. The adaptive native implementation and Projects 2–4 remain planned work.
+Persistent GPU ownership at the Python boundary is next. The adaptive native implementation and Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -17,8 +17,9 @@ Phase A Python-interface optimization is next. The adaptive native implementatio
 | CUDA kernel timing audit | Complete | Reusable-buffer steady-state protocol separates kernel optimization from sparse one-call behavior |
 | CUDA optimization checkpoint | Complete | Three exact isolated candidates were neutral, regressive, or within variability and were discarded |
 | CUDA transfer/residency characterization | Complete | Pageable, pinned, repeated-residency, and bounded CPU/GPU crossover behavior measured |
-| Correctness-first Python interface | Complete | Explicit-copy pybind11 serial/OpenMP/optional-CUDA API validated bit for bit |
-| Python interface optimization | **Next** | Remove NumPy/vector copies, then prototype persistent GPU ownership |
+| Correctness-first Python interface | Complete | pybind11 serial/OpenMP/optional-CUDA API validated bit for bit |
+| Direct NumPy-buffer CPU bindings | Complete | Removed both NumPy/vector copies from serial and OpenMP calls |
+| Persistent CUDA Python ownership | **Next** | Keep repeated GPU work device-resident with explicit lifetime semantics |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -32,7 +33,7 @@ The canonical workload contains 47,228,125 outputs with shape `(85, 35, 127, 125
 - Reprofiling found selection still dominant at approximately 70% of relevant samples.
 - Static OpenMP decomposition reached 319.583 ms at 20 threads: `8.729×` versus the fresh 2.789567 s optimized-serial baseline and 147.781 million outputs/s.
 - The CUDA baseline matched all 47,228,125 canonical optimized-serial outputs bit for bit. A timing audit established a 6.888 ms reusable-buffer steady-state kernel median; three subsequent kernel candidates did not justify replacing it. With persistent allocations, the current pageable one-call median was 99.866 ms versus a fresh 336.586 ms OpenMP-20 median (`3.370×`). Transfers consumed a median 93.456% of that path; pinned staging cut the transfer pair by about one-third, while ten device-resident operations reduced effective time to 17.083 ms/filter.
-- The pybind11 baseline exposes optimized serial, explicit-thread-count OpenMP, and optional one-shot CUDA calls with strict finite, four-dimensional, C-contiguous `float64` validation. All 47,228,125 canonical outputs matched bit for bit; current calls deliberately copy through native vectors.
+- The pybind11 interface exposes optimized serial, explicit-thread-count OpenMP, and optional one-shot CUDA calls with strict finite, four-dimensional, C-contiguous `float64` validation. Direct NumPy buffers made serial `1.097×` and OpenMP-20 `1.658×` faster than their copied binding baselines while preserving all 47,228,125 canonical outputs bit for bit. CUDA deliberately retains its copied one-shot path pending persistent device ownership.
 
 The optimized candidates matched the established Python and preceding C++ outputs bit for bit. Raw runs, benchmark boundaries, full scaling data, profiling caveats, and implementation progression are in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
 
@@ -48,7 +49,8 @@ Python reference
   → CUDA optimization checkpoint [complete]
   → transfer/residency analysis  [complete]
   → correctness-first Python interface [complete]
-  → direct-buffer/persistent-GPU interface work [next]
+  → direct NumPy-buffer CPU bindings [complete]
+  → persistent-GPU Python ownership [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
