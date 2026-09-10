@@ -364,10 +364,10 @@ One warm-up per path preceded five alternating-order Python-call trials on the s
 
 | Python path | Raw calls (s) | Min / median / max (s) | Direct speedup |
 | --- | --- | ---: | ---: |
-| Copied serial | 5.762266, 5.769502, 6.629529, 5.922454, 6.187763 | 5.762266 / 5.922454 / 6.629529 | — |
-| Direct serial | 5.399885, 5.333842, 5.293833, 5.942240, 5.617023 | 5.293833 / 5.399885 / 5.942240 | `1.096774×` |
-| Copied OpenMP-20 | 1.223860, 1.312665, 1.486077, 1.289512, 1.266270 | 1.223860 / 1.289512 / 1.486077 | — |
-| Direct OpenMP-20 | 0.777705, 0.753084, 0.689113, 0.863709, 0.910947 | 0.689113 / 0.777705 / 0.910947 | `1.658099×` |
+| Copied serial | 5.922454, 5.500569, 6.059027, 6.166293, 5.291195 | 5.291195 / 5.922454 / 6.166293 | — |
+| Direct serial | 5.910830, 5.425366, 5.011050, 5.399885, 5.361272 | 5.011050 / 5.399885 / 5.910830 | `1.096774×` |
+| Copied OpenMP-20 | 1.314089, 1.289512, 1.094861, 1.165806, 1.334648 | 1.094861 / 1.289512 / 1.334648 | — |
+| Direct OpenMP-20 | 0.805443, 0.747581, 0.739212, 0.777705, 0.780805 | 0.739212 / 0.777705 / 0.805443 | `1.658099×` |
 
 Removing the two copies saved approximately 0.523 s for serial and 0.512 s for OpenMP, reducing median call time by 8.82% and 39.69%, respectively. The retained finite-value scan had a 0.158454 s median (`0.126317 / 0.158454 / 0.167888` s min/median/max), about 2.9% of direct serial time but 20.4% of direct OpenMP time; it is now meaningful for the parallel path but remains required by the public contract.
 
