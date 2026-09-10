@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings use direct validated NumPy buffers, and the CUDA binding now offers both one-shot execution and explicit persistent device ownership. Native Phase B remains planned.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings use direct validated NumPy buffers, and the CUDA binding offers both one-shot execution and explicit persistent device ownership. Phase B has now begun with a separate correctness-first native adaptive-median baseline.
 
 ## Performance boundary
 
@@ -56,9 +56,12 @@ The native structure remains intentionally small:
 cpp/
     CMakeLists.txt
     include/
+        adaptive_median.hpp
         fixed_median.hpp
         fixed_median_cuda.hpp
     src/
+        adaptive_median.cpp
+        adaptive_validation.cpp
         cuda_benchmark.cpp
         cuda_kernel_benchmark.cpp
         cuda_transfer_characterization.cpp
@@ -88,6 +91,7 @@ cmake -S cpp -B cpp/build -G "Visual Studio 17 2022" -A x64
 cmake --build cpp/build --config Debug
 cmake --build cpp/build --config Release
 cpp\build\Release\phase_a_fixed_median.exe
+cpp\build\Release\phase_b_adaptive_median_validation.exe
 ```
 
 On this Windows system, CUDA 12.9 is selected explicitly because its Visual Studio build-customization files are installed with the toolkit but not registered under the Visual Studio directory:
@@ -114,7 +118,7 @@ C:\Users\haloe\anaconda3\envs\hanlab\python.exe python\validate_bindings.py
 
 Omit `PHASE_A_ENABLE_CUDA` and the CUDA toolset selection for a CPU-only extension. The build copies the CUDA runtime DLL beside a CUDA-enabled Windows module so modern Python can load it without a process-wide `PATH` change. Linux compilation remains unverified.
 
-CMake reads `CMakeLists.txt`, adds the project and libnpy include directories, applies the C++17 target requirements, and generates Visual Studio build files under `cpp/build/`. MSVC's `cl.exe` compiles the two source files; the linker combines their object files with the required runtime libraries to produce the executable. Debug favors diagnosis, while Release enables the toolchain's normal optimized configuration.
+CMake reads `CMakeLists.txt`, adds the project and libnpy include directories, applies the C++17 target requirements, and generates Visual Studio build files under `cpp/build/`. The Phase A and Phase B validation executables are separate targets; the adaptive target remains CPU-only and does not require CUDA. Debug favors diagnosis, while Release enables the toolchain's normal optimized configuration.
 
 Everything under `cpp/build/` is generated and may be deleted and recreated from `CMakeLists.txt`; it is ignored by Git.
 
@@ -422,11 +426,20 @@ For each independent detector-coordinate plane, the Python implementation pads t
 
 The reference is [python_reference_adaptive_median_filter.ipynb](python_reference_adaptive_median_filter.ipynb). The initial adaptive benchmark contract requires `scan_y >= 7` and `scan_x >= 7` so a complete maximum-size neighborhood is meaningful away from boundaries.
 
+### Phase B correctness-first native C++ baseline — 2026-09-10
+
+`adaptive_median_s3_smax7(...)` is a deliberately direct C++17 translation of the established finite-`float64` contract. It constructs a global-minimum-padded scan plane for each detector coordinate, extracts each `3 × 3`, `5 × 5`, or `7 × 7` window explicitly, selects the odd-count median with `std::nth_element`, applies strict Stage A and Stage B inequalities, and returns the original center after a failed `7 × 7` Stage A. Input validation, C-order indexing, output allocation, and the validation executable reuse existing native infrastructure without changing any Phase A implementation.
+
+The committed `(7, 7, 1, 4)` public fixture covers retain-center, replace-with-median, equality-driven `3 × 3` to `5 × 5` expansion, `7 × 7` expansion, maximum-window fallback, and global-minimum border padding. All 196 native outputs matched both the generated authoritative array and a fresh public 4Denoise call bit for bit; input remained unchanged. The ignored local `(16, 16, 4, 4)` fixture also matched all 4,096 values exactly.
+
+For a bounded starting measurement only, three Release native validation executions after an untimed setup check took 0.5819, 0.5261, and 0.4950 ms (0.5261 ms median). One in-process warm-up followed by three corresponding public 4Denoise calls took 66.4967, 67.8741, and 65.7886 ms (66.4967 ms median). This small workload is a correctness and operability baseline, not the formal Phase B benchmark or a profiling result. Algorithm optimization, OpenMP, CUDA, and Python binding work remain future steps.
+
 ## Data
 
 Four data roles are deliberately separate:
 
 - `reference_data/public_synthetic/` is committed and contains the deterministic, nonexperimental default correctness fixture.
+- `reference_data/public_adaptive/` is committed and contains the deterministic Phase B branch fixture.
 - `../ripple_data_reduced.npy` is the replaceable local upstream experimental source.
 - `benchmark_data/median_filter_input.npy` is the local fully prepared, unfiltered experimental performance input.
 - the historical fixed/adaptive experimental correctness slices remain local for scientific regression work.
@@ -441,6 +454,11 @@ No full fixed or adaptive filtered arrays are stored under `benchmark_data`.
 
 ```text
 reference_data/
+    public_adaptive/
+        generate_fixture.py
+        reference_input.npy
+        reference_output_python.npy
+        README.md
     public_synthetic/
         generate_fixture.py
         reference_input.npy
@@ -448,7 +466,7 @@ reference_data/
         README.md
 ```
 
-The public Phase A pair is finite, C-contiguous `float64` data generated solely from integer coordinates. The native executable checks both optimized serial and OpenMP results against its expected output bit for bit. The larger historical Phase A fixture and the Phase B experimental fixture are not distributed. The adaptive notebook retains a deterministic synthetic branch test in source form.
+Both public pairs are finite, C-contiguous `float64` data generated solely from deterministic integer-valued constructions. The Phase A executable checks its retained serial and OpenMP implementations; the Phase B executable checks the straightforward adaptive baseline. Both compare expected output bit for bit. The larger historical fixtures are not distributed.
 
 ## Regenerating the canonical input
 
@@ -466,7 +484,7 @@ For authorized local scientific work, place the experimental source outside vers
 
 Phase A completed the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
 
-Phase B is the main progression: reproduce the exact adaptive contract in clear C++, validate it, profile and optimize CPU behavior, implement and profile CUDA, optimize from evidence, integrate with Python, and report a reproducible benchmark matrix.
+Phase B is the main progression: the exact adaptive contract is now reproduced and validated in clear C++; the next stage is to establish and profile its native performance before any optimization, OpenMP, or CUDA work.
 
 ## Status
 
@@ -495,14 +513,14 @@ Completed reference and organization work:
 - direct NumPy-buffer CPU/OpenMP paths that removed the two intermediate vector copies and improved copied binding medians by `1.096774×` and `1.658099×`, respectively.
 - non-copyable `CudaMedianBuffer` RAII ownership with unchanged-kernel, original-input repeated-call semantics and a measured `19.170×` effective ten-operation speedup over repeated copied one-shot Python calls.
 - final public validation covering the regenerated Python reference, retained serial variants, OpenMP, one-shot CUDA, direct Python CPU paths, and persistent CUDA ownership.
+- correctness-first Phase B C++17 adaptive median with exact public 196-value and local 4,096-value validation against the established Python behavior.
 
-Phase A status: **complete**. Next: implement and exactly validate a straightforward native C++ Phase B adaptive median against the established Python contract before profiling, optimization, or CUDA work.
+Phase A status: **complete**. Phase B native baseline status: **complete**. Next: define the formal Phase B native benchmark protocol, benchmark the unchanged C++ baseline, and profile it before optimization.
 
 ## Remaining TBDs
 
 - Broader cross-platform repetition and problem-size validation beyond the current Windows laptop.
-- Supported native dtypes and whether nondefault odd adaptive windows belong in the first implementation.
+- Native dtype expansion, allocation policy, and nondefault odd adaptive windows remain outside the fixed `float64`, `s=3`, `sMax=7` baseline contract.
 - Linux/Lambda GCC-or-Clang OpenMP build validation and multicore scaling.
-- Native dtype expansion and allocation policy beyond the current `float64` fixed-filter path.
 - CUDA-array interoperability and any asynchronous or multi-GPU design remain outside the Phase A interface scope.
 - Scientific validation on replacement datasets whose detector sampling differs from the current source.

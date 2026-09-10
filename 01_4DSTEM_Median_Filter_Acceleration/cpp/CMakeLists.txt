@@ -14,6 +14,12 @@ add_executable(phase_a_baseline_benchmark
     src/fixed_median.cpp
 )
 
+add_executable(phase_b_adaptive_median_validation
+    src/adaptive_validation.cpp
+    src/adaptive_median.cpp
+    src/fixed_median.cpp
+)
+
 target_include_directories(phase_a_fixed_median
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -21,6 +27,12 @@ target_include_directories(phase_a_fixed_median
 )
 
 target_include_directories(phase_a_baseline_benchmark
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libnpy/include"
+)
+
+target_include_directories(phase_b_adaptive_median_validation
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libnpy/include"
@@ -43,6 +55,13 @@ set(PHASE_A_BENCHMARK_INPUT_PATH
     "${CMAKE_CURRENT_SOURCE_DIR}/../benchmark_data/median_filter_input.npy"
 )
 
+set(PHASE_B_REFERENCE_INPUT_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/../reference_data/public_adaptive/reference_input.npy"
+)
+set(PHASE_B_REFERENCE_OUTPUT_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/../reference_data/public_adaptive/reference_output_python.npy"
+)
+
 target_compile_definitions(phase_a_fixed_median
     PRIVATE
         PHASE_A_REFERENCE_INPUT_PATH="${PHASE_A_REFERENCE_INPUT_PATH}"
@@ -54,6 +73,12 @@ target_compile_definitions(phase_a_baseline_benchmark
         PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
 )
 
+target_compile_definitions(phase_b_adaptive_median_validation
+    PRIVATE
+        PHASE_B_REFERENCE_INPUT_PATH="${PHASE_B_REFERENCE_INPUT_PATH}"
+        PHASE_B_REFERENCE_OUTPUT_PATH="${PHASE_B_REFERENCE_OUTPUT_PATH}"
+)
+
 set_target_properties(phase_a_fixed_median PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED YES
@@ -61,6 +86,12 @@ set_target_properties(phase_a_fixed_median PROPERTIES
 )
 
 set_target_properties(phase_a_baseline_benchmark PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+
+set_target_properties(phase_b_adaptive_median_validation PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO

@@ -61,3 +61,5 @@ DEVELOPMENT_ENVIRONMENT.md
 01_4DSTEM_Median_Filter_Acceleration/reference_data/*
 !01_4DSTEM_Median_Filter_Acceleration/reference_data/public_synthetic/
 !01_4DSTEM_Median_Filter_Acceleration/reference_data/public_synthetic/**
+!01_4DSTEM_Median_Filter_Acceleration/reference_data/public_adaptive/
+!01_4DSTEM_Median_Filter_Acceleration/reference_data/public_adaptive/**

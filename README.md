@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. The current strongest completed work is **Project 1 Phase A**: a four-dimensional median-filter workload taken from an authoritative Python/4Denoise contract through clear C++17, CPU profiling, isolated serial optimizations, portable OpenMP scaling, a profiled correctness-first CUDA baseline, controlled CUDA experiments, transfer/residency characterization, and exact pybind11 bindings with direct NumPy-buffer CPU execution and explicit persistent CUDA ownership.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B has begun with an exact correctness-first native adaptive-median baseline.
 
-Phase A is complete. The next technical milestone is a correctness-first native C++ baseline for the already-established Phase B adaptive-median contract; Projects 2–4 remain planned work.
+The next technical milestone is formal benchmarking and profiling of the unchanged Phase B native baseline; Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -21,7 +21,8 @@ Phase A is complete. The next technical milestone is a correctness-first native 
 | Direct NumPy-buffer CPU bindings | Complete | Removed both NumPy/vector copies from serial and OpenMP calls |
 | Persistent CUDA Python ownership | Complete | Non-copyable RAII owner amortizes allocation and transfer costs across repeated calls |
 | Phase A final consolidation | Complete | Public validation matrix, claims, build options, and repository hygiene audited |
-| Phase B adaptive median native baseline | **Next** | Implement the established adaptive contract clearly in C++ before profiling or CUDA |
+| Phase B adaptive median native baseline | Complete | Public branch fixture and local fixture match the established Python behavior bit for bit |
+| Phase B native benchmark and profile | **Next** | Measure the unchanged C++ baseline before any optimization, OpenMP, or CUDA work |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -54,7 +55,8 @@ Python reference
   → direct NumPy-buffer CPU bindings [complete]
   → persistent-GPU Python ownership [complete]
   → final Phase A validation/report [complete]
-  → Phase B correctness-first native C++ [next]
+  → Phase B correctness-first native C++ [complete]
+  → Phase B native benchmark and profile [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -64,6 +66,8 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
 ```text
 01_4DSTEM_Median_Filter_Acceleration/
     cpp/                         C++17 serial/OpenMP/CUDA source and CMake build
+        include/adaptive_median.hpp
+                                 correctness-first Phase B native API
         include/fixed_median_cuda.hpp
                                  CUDA interface, RAII owner, and timing result types
         src/fixed_median_cuda.cu baseline kernel, one-shot path, and resident buffers
@@ -74,6 +78,11 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
                                  reusable-buffer steady-state kernel benchmark
         src/cuda_transfer_characterization.cpp
                                  pageable/pinned, residency, and crossover benchmark
+        src/adaptive_median.cpp  direct adaptive-median baseline
+        src/adaptive_validation.cpp
+                                 public exact Phase B validation executable
+    reference_data/public_adaptive/
+                                 public deterministic adaptive branch fixture
     reference_data/public_synthetic/
                                  public deterministic correctness fixture
     benchmark_data/              instructions for local compatible inputs

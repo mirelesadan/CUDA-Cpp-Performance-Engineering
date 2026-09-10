@@ -130,6 +130,8 @@ Phase B reproduces the current 4Denoise adaptive algorithm with `s=3` and `sMax=
 
 The adaptive reference includes a deterministic `(7, 7, 1, 4)` branch test and a local, already-preprocessed `(16, 16, 4, 4)` real-data fixture. Finite `float64` outputs must match bit for bit. The experimental fixture is not distributed. Phase B becomes the main performance-engineering narrative after the Phase A warm-up.
 
+The correctness-first native C++17 baseline was completed on 2026-09-10. It follows the Python control flow directly: separate detector-coordinate planes, global-minimum constant padding, explicit `3 × 3`/`5 × 5`/`7 × 7` windows, odd-count `std::nth_element` medians, strict Stage A/Stage B comparisons, and original-center fallback after the maximum window. The new committed public fixture covers every major branch and matched all 196 values bit for bit; the ignored local fixture matched all 4,096 values. A small local timing check established a 0.5261 ms native median versus 66.4967 ms for the public Python path, but formal benchmarking and profiling intentionally remain next.
+
 ### Intended contribution
 
 Demonstrate a credible progression from a controlled fixed-window exercise to a measured adaptive bottleneck, then through modern C++, CPU optimization, CUDA, GPU profiling, validation, Python integration, and clear performance reporting.
@@ -261,8 +263,8 @@ All projects currently live in this public parent portfolio, and future work sho
 - [x] Profile the unmodified Python implementation on representative prepared data
 - [x] Compare adaptive and fixed filters fairly on the same prepared subset
 - [ ] Define the formal benchmark hardware, repetition policy, and problem-size matrix
-- [ ] Implement straightforward C++
-- [ ] Validate C++ output
+- [x] Implement straightforward C++
+- [x] Validate C++ output
 - [ ] Benchmark and profile C++
 - [ ] Optimize and re-measure the CPU implementation
 - [ ] Implement initial CUDA
