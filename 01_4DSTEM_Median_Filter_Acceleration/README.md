@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, and transfer/residency characterization are recorded below. The Phase A kernel-optimization checkpoint is complete; Python integration and native Phase B work are next.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and correctness-first Python interface are recorded below. Direct-buffer and persistent-device Python experiments remain future work; native Phase B is also planned.
 
 ## Performance boundary
 
@@ -60,17 +60,20 @@ cpp/
         main.cpp
         fixed_median.cpp
         fixed_median_cuda.cu
+        python_bindings.cpp
     third_party/
         libnpy/
             include/npy.hpp
             LICENSE
             README.md
     build/              # generated; ignored by Git
+python/
+    validate_bindings.py
 ```
 
 `fixed_median.cpp` contains the correctness-first fixed `3 × 3` implementation: half-sample symmetric reflection on the two scan axes, nine-value median selection, and separate input/output storage. `main.cpp` loads and validates an input/reference pair and compares every `double` by its `uint64_t` bit representation. The public default is a deterministic synthetic fixture; alternate compatible arrays may be supplied explicitly. General shape is discovered at runtime.
 
-The CPU targets depend only on compiler-supported OpenMP and the vendored, header-only [libnpy](cpp/third_party/libnpy/README.md) `v1.0.1`, pinned to commit `890ea4fcda302a580e633c624c6a63e2a5d422f6` under its MIT license. CUDA is opt-in through `PHASE_A_ENABLE_CUDA`; CMake then enables the CUDA language and links the standard `CUDA::cudart` target. The source-tree fixture paths are embedded, so default validation runs do not depend on the working directory.
+The CPU targets depend only on compiler-supported OpenMP and the vendored, header-only [libnpy](cpp/third_party/libnpy/README.md) `v1.0.1`, pinned to commit `890ea4fcda302a580e633c624c6a63e2a5d422f6` under its MIT license. CUDA is opt-in through `PHASE_A_ENABLE_CUDA`; CMake then enables the CUDA language and links the standard `CUDA::cudart` target. Python bindings are independently opt-in through `PHASE_A_ENABLE_PYTHON` and require pybind11 in the selected Python environment. The source-tree fixture paths are embedded, so default validation runs do not depend on the working directory.
 
 From a Visual Studio 2022 x64 Developer Command Prompt, configure and build with:
 
@@ -93,6 +96,17 @@ cpp\out\cuda\Release\phase_a_cuda_transfer_characterization.exe
 ```
 
 Other installations with registered CUDA integration may omit the explicit `-T` selection; `PHASE_A_CUDA_ARCHITECTURES` remains overridable for other GPUs. No Visual Studio or toolkit installation was modified.
+
+The correctness-first Python extension can be built CPU-only or together with CUDA. This Windows example uses the `hanlab` interpreter and enables both:
+
+```bat
+cmake -S cpp -B cpp/out/python -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPHASE_A_ENABLE_CUDA=ON -DPHASE_A_ENABLE_PYTHON=ON -DPython_EXECUTABLE=C:\Users\haloe\anaconda3\envs\hanlab\python.exe
+cmake --build cpp/out/python --config Release --target fourdstem_median
+set PYTHONPATH=%CD%\cpp\out\python\Release
+C:\Users\haloe\anaconda3\envs\hanlab\python.exe python\validate_bindings.py
+```
+
+Omit `PHASE_A_ENABLE_CUDA` and the CUDA toolset selection for a CPU-only extension. The build copies the CUDA runtime DLL beside a CUDA-enabled Windows module so modern Python can load it without a process-wide `PATH` change. Linux compilation remains unverified.
 
 CMake reads `CMakeLists.txt`, adds the project and libnpy include directories, applies the C++17 target requirements, and generates Visual Studio build files under `cpp/build/`. MSVC's `cl.exe` compiles the two source files; the linker combines their object files with the required runtime libraries to produce the executable. Debug favors diagnosis, while Release enables the toolchain's normal optimized configuration.
 
@@ -318,7 +332,25 @@ Pinned storage made the transfer pair `1.582×` faster, a 36.783% reduction, and
 
 A bounded synthetic size check compared optimized serial, OpenMP at 4/8/20 threads, and the pageable CUDA total. OpenMP was fastest through 4,096,000 outputs; CUDA was fastest at 10,000,000 and at the 47,228,125-output canonical workload. The observed crossover therefore lies between approximately 4.1 and 10 million outputs for these shapes on this laptop. Because pageable-copy variability was high and shape affects cache behavior, this bracket is directional rather than universal.
 
-The future Python interface should offer a simple copying call for convenience and an explicit persistent device-resident path for repeated or multi-stage GPU work, with clear upload/filter/download ownership and lifetime. Pinned host staging can be an opt-in implementation detail for unavoidable synchronous copies; device-resident interoperability should take priority over forcing every NumPy call through a copy.
+These results motivated a simple copying Python call first, followed later by explicit device-resident ownership for repeated or multi-stage GPU work.
+
+### Phase A correctness-first Python interface — 2026-09-09
+
+The opt-in pybind11 `fourdstem_median` module exposes `fixed_median_serial(array)`, `fixed_median_openmp(array, thread_count)`, and, in a CUDA-enabled build, `fixed_median_cuda(array)` plus `cuda_device_info()`. It requires an actual four-dimensional, nonempty, finite, exactly `float64`, C-contiguous NumPy array in `(scan_y, scan_x, detector_y, detector_x)` order; invalid inputs are rejected rather than cast or copied into compliance. Each filter returns a new C-contiguous `float64` array of the same shape and leaves its input unchanged.
+
+This baseline deliberately performs `NumPy → std::vector<double>` before the native call and `std::vector<double> → NumPy` afterward. The CUDA path additionally performs its existing one-shot device allocation, H2D copy, kernel, and D2H copy. The GIL remains released only while native filtering or CUDA device discovery runs; all Python/NumPy validation, allocation, and copying occurs with the GIL held.
+
+The committed public 840-element fixture matched its expected output bit for bit through the serial binding; OpenMP matched serial, and CUDA matched serial. Contract tests also verified output ownership, input immutability, and rejection of non-array, wrong-rank, wrong-dtype, noncontiguous, empty, and nonfinite inputs. On the local canonical input, all 47,228,125 serial, OpenMP-20, and CUDA outputs matched bit for bit.
+
+One warm-up and three Python-call wall-time trials produced:
+
+| Bound path | Raw calls (s) | Min / median / max (s) |
+| --- | --- | ---: |
+| Optimized serial | 8.871872, 8.901303, 9.016662 | 8.871872 / 8.901303 / 9.016662 |
+| OpenMP, 20 threads | 2.400907, 2.306518, 2.392543 | 2.306518 / 2.392543 / 2.400907 |
+| One-shot CUDA | 1.059146, 1.192683, 1.118562 | 1.059146 / 1.118562 / 1.192683 |
+
+These are interface-level baselines, not replacements for the established native and kernel timings. They include both host-vector copies; CUDA also includes one-shot native allocation and H2D/D2H transfers. CPU performance in this session was substantially slower than earlier milestone sessions—a same-session native serial check measured 9.909451 s—so the full historical difference cannot be attributed to binding copies. The next isolated interface experiment should remove NumPy-to-vector and vector-to-NumPy copies through validated direct-buffer native entry points; persistent CUDA ownership should follow once the host boundary is measured cleanly.
 
 ## Phase B — adaptive median performance target
 

@@ -87,6 +87,7 @@ endif()
 # Keep the portable CPU-only build available by default. CUDA targets are
 # enabled explicitly on systems with a CUDA compiler and runtime.
 option(PHASE_A_ENABLE_CUDA "Build the correctness-first CUDA baseline targets" OFF)
+option(PHASE_A_ENABLE_PYTHON "Build the correctness-first pybind11 Python module" OFF)
 set(PHASE_A_CUDA_ARCHITECTURES "89" CACHE STRING
     "CUDA architectures for Phase A targets (for example, 89 for Ada)"
 )
@@ -167,4 +168,66 @@ if(PHASE_A_ENABLE_CUDA)
         PRIVATE
             PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
     )
+endif()
+
+if(PHASE_A_ENABLE_PYTHON)
+    set(PYBIND11_FINDPYTHON ON)
+    find_package(Python 3 REQUIRED COMPONENTS Interpreter Development.Module)
+
+    execute_process(
+        COMMAND "${Python_EXECUTABLE}" -m pybind11 --cmakedir
+        RESULT_VARIABLE PHASE_A_PYBIND11_RESULT
+        OUTPUT_VARIABLE PHASE_A_PYBIND11_CMAKE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_VARIABLE PHASE_A_PYBIND11_ERROR
+    )
+    if(NOT PHASE_A_PYBIND11_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "pybind11 is required in the selected Python environment: "
+            "${PHASE_A_PYBIND11_ERROR}"
+        )
+    endif()
+
+    find_package(pybind11 CONFIG REQUIRED
+        PATHS "${PHASE_A_PYBIND11_CMAKE_DIR}"
+        NO_DEFAULT_PATH
+    )
+
+    pybind11_add_module(fourdstem_median MODULE
+        src/python_bindings.cpp
+        src/fixed_median.cpp
+    )
+    target_include_directories(fourdstem_median
+        PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    target_link_libraries(fourdstem_median PRIVATE OpenMP::OpenMP_CXX)
+    set_target_properties(fourdstem_median PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+    )
+
+    if(PHASE_A_ENABLE_CUDA)
+        target_link_libraries(fourdstem_median PRIVATE phase_a_cuda_baseline)
+        target_compile_definitions(fourdstem_median
+            PRIVATE PHASE_A_PYTHON_CUDA_ENABLED=1
+        )
+        if(WIN32)
+            # Python 3.8+ uses a restricted DLL search path for extension
+            # dependencies. Keep the CUDA runtime beside the local module.
+            find_file(PHASE_A_CUDART_DLL
+                NAMES "cudart64_${CUDAToolkit_VERSION_MAJOR}.dll"
+                HINTS "${CUDAToolkit_BIN_DIR}"
+                REQUIRED
+                NO_DEFAULT_PATH
+            )
+            add_custom_command(TARGET fourdstem_median POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${PHASE_A_CUDART_DLL}"
+                    "$<TARGET_FILE_DIR:fourdstem_median>"
+                COMMENT "Copying the CUDA runtime beside the Python module"
+            )
+        endif()
+    endif()
 endif()
