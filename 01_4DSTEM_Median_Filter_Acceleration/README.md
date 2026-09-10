@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings now use direct validated NumPy buffers; persistent-device Python ownership and native Phase B remain planned.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings use direct validated NumPy buffers, and the CUDA binding now offers both one-shot execution and explicit persistent device ownership. Native Phase B remains planned.
 
 ## Performance boundary
 
@@ -372,6 +372,31 @@ One warm-up per path preceded five alternating-order Python-call trials on the s
 Removing the two copies saved approximately 0.523 s for serial and 0.512 s for OpenMP, reducing median call time by 8.82% and 39.69%, respectively. The retained finite-value scan had a 0.158454 s median (`0.126317 / 0.158454 / 0.167888` s min/median/max), about 2.9% of direct serial time but 20.4% of direct OpenMP time; it is now meaningful for the parallel path but remains required by the public contract.
 
 A fresh three-run native vector-API check measured `4.062016 / 5.218265 / 7.737714` s serial and `0.794332 / 0.827192 / 2.335497` s OpenMP-20 at min/median/max. The direct Python medians were within 3.5% of the native serial median and 6.0% below the variable native OpenMP median, so no stable residual binding penalty beyond validation/output ownership is established. The direct CPU architecture is retained; explicit persistent CUDA ownership is the next Python-interface experiment.
+
+### Phase A persistent CUDA Python ownership — 2026-09-10
+
+The CUDA-enabled module now also exposes `CudaMedianBuffer(array)`. Construction validates the same strict NumPy contract, allocates one device input and one device output through a non-copyable RAII owner, and synchronously uploads directly from the NumPy buffer. The Python input may be released after construction. `filter()` launches the unchanged baseline kernel against the originally uploaded resident input and overwrites the same resident output; repeated calls do not silently chain output back to input. `download()` is valid after filtering and returns a new independently owned NumPy array. The read-only `shape` property reports the recorded four-dimensional shape. No raw device pointer or global persistent state is exposed, and the existing `fixed_median_cuda(array)` one-shot API remains unchanged.
+
+Python validation and NumPy allocation hold the GIL. Device discovery, resident allocation/upload, filtering/synchronization, and download release it. Destruction releases each device allocation exactly once; copying and moving the native owner are disabled. The public fixture passed one and repeated resident filters, download independence, source lifetime/immutability, download-before-filter, and all invalid-input cases. Its one-shot and resident CUDA results matched serial bit for bit. One canonical resident result also matched the established serial/OpenMP/one-shot CUDA reference across all 47,228,125 outputs.
+
+One warm-up per workflow preceded five interleaved, alternating-order Python wall-time trials. A persistent total includes construction/validation/device allocation/upload, the requested synchronous `filter()` calls, NumPy allocation/download, and RAII device release; deletion of the returned NumPy result is outside both endpoints. These workflow times are not kernel-only measurements.
+
+| Python CUDA workflow | Raw total calls (s) | Min / median / max total (s) | Median effective time/filter | Speedup vs repeated one-shot |
+| --- | --- | ---: | ---: | ---: |
+| Existing one-shot | 0.354173, 0.900909, 0.835481, 0.750910, 0.904223 | 0.354173 / 0.835481 / 0.904223 | 0.835481 s | — |
+| Persistent, 1 filter | 0.150375, 0.332802, 0.352179, 0.370421, 0.444610 | 0.150375 / 0.352179 / 0.444610 | 0.352179 s | `2.372×` |
+| Persistent, 2 filters | 0.162077, 0.367729, 0.320582, 0.332064, 0.337658 | 0.162077 / 0.332064 / 0.367729 | 0.166032 s | `5.032×` |
+| Persistent, 5 filters | 0.177683, 0.179381, 0.413448, 0.353763, 0.436906 | 0.177683 / 0.353763 / 0.436906 | 0.070753 s | `11.808×` |
+| Persistent, 10 filters | 0.209745, 0.210104, 0.435821, 0.502478, 0.497004 | 0.209745 / 0.435821 / 0.502478 | 0.043582 s | `19.170×` |
+
+| Resident filters | Median creation/upload | Median kernel sequence | Median download | Median release |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.176977 s | 0.006638 s | 0.140738 s | 0.008448 s |
+| 2 | 0.168699 s | 0.013195 s | 0.141638 s | 0.008118 s |
+| 5 | 0.177678 s | 0.032845 s | 0.135660 s | 0.007465 s |
+| 10 | 0.172477 s | 0.065855 s | 0.148792 s | 0.007011 s |
+
+Even a one-filter persistent workflow was 57.85% shorter than the copied one-shot call in this session; this difference combines avoided NumPy/vector copies with the simpler retained-buffer path rather than isolating one overhead. At ten filters, the resident kernel sequence remained about 6.59 ms per launch and fixed ownership/transfer costs were amortized to a 43.582 ms effective workflow time. Pageable host timings were visibly variable, so these Python totals do not supersede the native CUDA-event results. They do confirm the earlier residency conclusion: explicit device lifetime materially improves repeated Python-facing CUDA work. Phase A should now receive a final consolidated validation/report pass rather than another kernel micro-optimization, then native Phase B can begin.
 
 ## Phase B — adaptive median performance target
 

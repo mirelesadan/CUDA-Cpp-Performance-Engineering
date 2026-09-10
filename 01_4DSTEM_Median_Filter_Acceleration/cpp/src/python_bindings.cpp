@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -183,6 +184,66 @@ PYBIND11_MODULE(fourdstem_median, module)
         "Apply the optimized OpenMP fixed 3x3 scan-space median filter.");
 
 #ifdef PHASE_A_PYTHON_CUDA_ENABLED
+    py::class_<phase_a::CudaMedianBuffer>(module, "CudaMedianBuffer")
+        .def(
+            py::init([](const py::object& input_object) {
+                const ValidatedInput input =
+                    validate_input_metadata(input_object);
+                validate_finite_values(input);
+
+                std::unique_ptr<phase_a::CudaMedianBuffer> buffer;
+                {
+                    // input_object remains alive while the synchronous upload
+                    // reads its validated NumPy buffer without a host-side copy.
+                    py::gil_scoped_release release;
+                    buffer = std::make_unique<phase_a::CudaMedianBuffer>(
+                        input.data,
+                        input.dimensions);
+                }
+                return buffer;
+            }),
+            py::arg("array"),
+            "Allocate resident CUDA buffers and upload one validated input.")
+        .def(
+            "filter",
+            [](phase_a::CudaMedianBuffer& buffer) {
+                py::gil_scoped_release release;
+                // Every call reads the original resident input and overwrites
+                // the resident output; calls do not chain output back to input.
+                buffer.filter();
+            },
+            "Apply the fixed median to the originally uploaded input.")
+        .def(
+            "download",
+            [](const phase_a::CudaMedianBuffer& buffer) {
+                const phase_a::Dimensions4D dimensions = buffer.dimensions();
+                const std::array<py::ssize_t, 4> shape = {
+                    static_cast<py::ssize_t>(dimensions.scan_y),
+                    static_cast<py::ssize_t>(dimensions.scan_x),
+                    static_cast<py::ssize_t>(dimensions.detector_y),
+                    static_cast<py::ssize_t>(dimensions.detector_x),
+                };
+                py::array_t<double> output(shape);
+                double* const output_data = output.mutable_data();
+                {
+                    py::gil_scoped_release release;
+                    buffer.download(output_data);
+                }
+                return output;
+            },
+            "Download the current resident output into a new NumPy array.")
+        .def_property_readonly(
+            "shape",
+            [](const phase_a::CudaMedianBuffer& buffer) {
+                const phase_a::Dimensions4D dimensions = buffer.dimensions();
+                return py::make_tuple(
+                    dimensions.scan_y,
+                    dimensions.scan_x,
+                    dimensions.detector_y,
+                    dimensions.detector_x);
+            },
+            "The resident array shape in scan_y, scan_x, detector_y, detector_x order.");
+
     module.def(
         "fixed_median_cuda",
         [](const py::object& input) {

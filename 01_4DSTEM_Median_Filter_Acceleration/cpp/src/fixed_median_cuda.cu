@@ -420,6 +420,109 @@ BenchmarkLaunch prepare_benchmark_launch(
 
 } // namespace
 
+struct CudaMedianBuffer::Impl {
+    explicit Impl(const double* host_input, const Dimensions4D& input_dimensions)
+        : dimensions(input_dimensions)
+    {
+        if (host_input == nullptr) {
+            throw std::invalid_argument("CUDA resident input pointer must not be null.");
+        }
+
+        element_count = checked_element_count(dimensions);
+        if (dimensions.scan_y >
+                static_cast<std::size_t>(std::numeric_limits<long long>::max()) ||
+            dimensions.scan_x >
+                static_cast<std::size_t>(std::numeric_limits<long long>::max())) {
+            throw std::overflow_error(
+                "Scan dimensions are too large for signed reflected indexing.");
+        }
+
+        check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+        cudaDeviceProp properties{};
+        check_cuda(
+            cudaGetDeviceProperties(&properties, cuda_device_index),
+            "cudaGetDeviceProperties");
+        const std::size_t required_blocks =
+            (element_count + threads_per_block - 1) / threads_per_block;
+        if (required_blocks >
+            static_cast<std::size_t>(properties.maxGridSize[0])) {
+            throw std::overflow_error(
+                "CUDA resident buffer requires more one-dimensional blocks than the device supports.");
+        }
+
+        block_count = static_cast<unsigned int>(required_blocks);
+        bytes = element_count * sizeof(double);
+        device_input = std::make_unique<DeviceBuffer>(bytes);
+        device_output = std::make_unique<DeviceBuffer>(bytes);
+        check_cuda(
+            cudaMemcpy(
+                device_input->get(),
+                host_input,
+                bytes,
+                cudaMemcpyHostToDevice),
+            "resident CUDA buffer upload");
+    }
+
+    Dimensions4D dimensions;
+    std::size_t element_count = 0;
+    std::size_t bytes = 0;
+    unsigned int block_count = 0;
+    std::unique_ptr<DeviceBuffer> device_input;
+    std::unique_ptr<DeviceBuffer> device_output;
+    bool output_ready = false;
+};
+
+CudaMedianBuffer::CudaMedianBuffer(
+    const double* host_input,
+    const Dimensions4D& dimensions)
+    : impl_(std::make_unique<Impl>(host_input, dimensions))
+{
+}
+
+CudaMedianBuffer::~CudaMedianBuffer() = default;
+
+void CudaMedianBuffer::filter()
+{
+    check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+    fixed_median_3x3_kernel<<<impl_->block_count, threads_per_block>>>(
+        impl_->device_input->get(),
+        impl_->device_output->get(),
+        impl_->element_count,
+        impl_->dimensions.scan_y,
+        impl_->dimensions.scan_x,
+        impl_->dimensions.detector_y,
+        impl_->dimensions.detector_x);
+    check_cuda(cudaGetLastError(), "resident fixed_median_3x3_kernel launch");
+    check_cuda(
+        cudaDeviceSynchronize(),
+        "cudaDeviceSynchronize after resident fixed_median_3x3_kernel");
+    impl_->output_ready = true;
+}
+
+void CudaMedianBuffer::download(double* host_output) const
+{
+    if (host_output == nullptr) {
+        throw std::invalid_argument("CUDA resident output pointer must not be null.");
+    }
+    if (!impl_->output_ready) {
+        throw std::logic_error("filter() must be called before download().");
+    }
+
+    check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+    check_cuda(
+        cudaMemcpy(
+            host_output,
+            impl_->device_output->get(),
+            impl_->bytes,
+            cudaMemcpyDeviceToHost),
+        "resident CUDA buffer download");
+}
+
+Dimensions4D CudaMedianBuffer::dimensions() const
+{
+    return impl_->dimensions;
+}
+
 CudaDeviceInfo cuda_device_info()
 {
     check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");

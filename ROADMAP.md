@@ -120,6 +120,8 @@ The correctness-first Phase A Python interface was completed on 2026-09-09 with 
 
 Direct NumPy-buffer CPU bindings were completed on 2026-09-10. New caller-owned pointer entry points share one factored computational core with the retained vector APIs, and pybind11 keeps both NumPy owners alive while the GIL-free native call reads input and writes a new output directly. The fixture and all 47,228,125 canonical outputs remained bitwise exact. Against opt-in copied comparison paths, direct serial improved from 5.922454 to 5.399885 s (`1.096774×`) and direct OpenMP-20 from 1.289512 to 0.777705 s (`1.658099×`), removing approximately 0.52 s from either path. Finite validation retained a 0.158454 s median and is meaningful for the parallel interface but remains part of the contract. CPU direct buffers are retained; CUDA still uses the copied one-shot path, and persistent CUDA ownership is next.
 
+Persistent CUDA Python ownership was completed on 2026-09-10 without changing the kernel or removing the one-shot API. The non-copyable `CudaMedianBuffer` RAII owner allocates and uploads once, keeps input/output device storage across calls, applies every filter to the same original resident input, and downloads into independent NumPy-owned output. Fixture lifetime, ownership, repeated-call, invalid-input, and bitwise checks passed; the canonical resident result matched all 47,228,125 established outputs. In five interleaved Python workflow trials, the copied one-shot median was 0.835481 s. Persistent effective medians were 0.352179, 0.166032, 0.070753, and 0.043582 s/filter for 1, 2, 5, and 10 filters, respectively. Pageable host stages remained variable, while the ten-filter kernel sequence retained approximately 6.59 ms/launch. The architecture is retained; the next Phase A step is a final consolidated validation/report pass before native Phase B work.
+
 ### Phase B — adaptive median performance target
 
 Phase B reproduces the current 4Denoise adaptive algorithm with `s=3` and `sMax=7`. The source performs nested Python pixel loops, strict two-stage min/median/max decisions, and conditional window growth with per-plane global-minimum constant padding. Initial profiling on bounded prepared subsets established repeated per-pixel neighborhood statistics as the dominant Python cost. Exact subset shapes and timings are runtime results recorded in the executed notebook, not permanent project claims.
@@ -246,7 +248,8 @@ All projects currently live in this public parent portfolio, and future work sho
 - [x] Characterize pageable/pinned transfers, residency amortization, and CPU/GPU crossover
 - [x] Add a correctness-first Python interface with explicit host-copy behavior and optional CUDA
 - [x] Remove NumPy/vector copies from CPU/OpenMP through validated direct-buffer entry points
-- [ ] Add explicit persistent CUDA ownership for repeated device-resident work
+- [x] Add explicit persistent CUDA ownership for repeated device-resident work
+- [ ] Consolidate final Phase A validation, reproduction guidance, and headline results
 
 #### Phase B — Adaptive Median
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,25 @@ struct CudaTransferCharacterizationResult {
     std::vector<double> diagnostic_pinned_h2d_milliseconds;
     std::vector<double> diagnostic_pinned_d2h_milliseconds;
     std::string pinned_memory_error;
+};
+
+class CudaMedianBuffer {
+public:
+    CudaMedianBuffer(const double* host_input, const Dimensions4D& dimensions);
+    ~CudaMedianBuffer();
+
+    CudaMedianBuffer(const CudaMedianBuffer&) = delete;
+    CudaMedianBuffer& operator=(const CudaMedianBuffer&) = delete;
+    CudaMedianBuffer(CudaMedianBuffer&&) = delete;
+    CudaMedianBuffer& operator=(CudaMedianBuffer&&) = delete;
+
+    void filter();
+    void download(double* host_output) const;
+    Dimensions4D dimensions() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 CudaDeviceInfo cuda_device_info();
