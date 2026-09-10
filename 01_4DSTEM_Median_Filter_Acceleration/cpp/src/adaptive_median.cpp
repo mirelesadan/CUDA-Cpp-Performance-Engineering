@@ -57,9 +57,11 @@ double median_of_window(std::vector<double>& values)
 
 } // namespace
 
-std::vector<double> adaptive_median_s3_smax7(
+template <bool collect_statistics>
+std::vector<double> adaptive_median_impl(
     const std::vector<double>& input,
-    const phase_a::Dimensions4D& dimensions)
+    const phase_a::Dimensions4D& dimensions,
+    AdaptiveMedianStatistics& statistics)
 {
     const std::size_t element_count = checked_element_count(dimensions);
     if (input.size() != element_count) {
@@ -111,6 +113,9 @@ std::vector<double> adaptive_median_s3_smax7(
 
             for (std::size_t scan_y = 0; scan_y < dimensions.scan_y; ++scan_y) {
                 for (std::size_t scan_x = 0; scan_x < dimensions.scan_x; ++scan_x) {
+                    if constexpr (collect_statistics) {
+                        ++statistics.total_outputs;
+                    }
                     const std::size_t center_y = scan_y + padding;
                     const std::size_t center_x = scan_x + padding;
                     const double center = padded_plane[padded_index(
@@ -118,6 +123,9 @@ std::vector<double> adaptive_median_s3_smax7(
                     double result = center;
 
                     for (const std::size_t window_size : window_sizes) {
+                        if constexpr (collect_statistics) {
+                            ++statistics.median_computations;
+                        }
                         const std::size_t radius = window_size / 2;
                         std::vector<double> window;
                         window.reserve(window_size * window_size);
@@ -140,16 +148,47 @@ std::vector<double> adaptive_median_s3_smax7(
 
                         const double local_median = median_of_window(window);
                         if (local_minimum < local_median && local_median < local_maximum) {
-                            result = local_minimum < center && center < local_maximum
-                                ? center
-                                : local_median;
+                            if constexpr (collect_statistics) {
+                                if (window_size == 3) {
+                                    ++statistics.finished_at_3x3;
+                                }
+                                else if (window_size == 5) {
+                                    ++statistics.finished_at_5x5;
+                                }
+                                else {
+                                    ++statistics.finished_at_7x7;
+                                }
+                            }
+                            const bool retain_center =
+                                local_minimum < center && center < local_maximum;
+                            result = retain_center ? center : local_median;
+                            if constexpr (collect_statistics) {
+                                if (retain_center) {
+                                    ++statistics.stage_b_retained_center;
+                                }
+                                else {
+                                    ++statistics.stage_b_replaced_with_median;
+                                }
+                            }
                             break;
+                        }
+
+                        if constexpr (collect_statistics) {
+                            if (window_size == 3) {
+                                ++statistics.expanded_to_5x5;
+                            }
+                            else if (window_size == 5) {
+                                ++statistics.expanded_to_7x7;
+                            }
                         }
 
                         // The Python reference returns the center associated with
                         // the final tested window when growth beyond sMax is requested.
                         if (window_size == window_sizes.back()) {
                             result = center;
+                            if constexpr (collect_statistics) {
+                                ++statistics.maximum_window_fallback;
+                            }
                         }
                     }
 
@@ -161,6 +200,23 @@ std::vector<double> adaptive_median_s3_smax7(
     }
 
     return output;
+}
+
+std::vector<double> adaptive_median_s3_smax7(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    AdaptiveMedianStatistics unused_statistics;
+    return adaptive_median_impl<false>(input, dimensions, unused_statistics);
+}
+
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    AdaptiveMedianDiagnosticResult result;
+    result.output = adaptive_median_impl<true>(input, dimensions, result.statistics);
+    return result;
 }
 
 } // namespace phase_b

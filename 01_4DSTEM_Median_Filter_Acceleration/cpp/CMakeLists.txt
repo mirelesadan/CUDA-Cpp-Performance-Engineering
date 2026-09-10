@@ -20,6 +20,12 @@ add_executable(phase_b_adaptive_median_validation
     src/fixed_median.cpp
 )
 
+add_executable(phase_b_adaptive_median_benchmark
+    src/adaptive_benchmark.cpp
+    src/adaptive_median.cpp
+    src/fixed_median.cpp
+)
+
 target_include_directories(phase_a_fixed_median
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -33,6 +39,12 @@ target_include_directories(phase_a_baseline_benchmark
 )
 
 target_include_directories(phase_b_adaptive_median_validation
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libnpy/include"
+)
+
+target_include_directories(phase_b_adaptive_median_benchmark
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libnpy/include"
@@ -79,6 +91,11 @@ target_compile_definitions(phase_b_adaptive_median_validation
         PHASE_B_REFERENCE_OUTPUT_PATH="${PHASE_B_REFERENCE_OUTPUT_PATH}"
 )
 
+target_compile_definitions(phase_b_adaptive_median_benchmark
+    PRIVATE
+        PHASE_B_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
+)
+
 set_target_properties(phase_a_fixed_median PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED YES
@@ -97,6 +114,12 @@ set_target_properties(phase_b_adaptive_median_validation PROPERTIES
     CXX_EXTENSIONS NO
 )
 
+set_target_properties(phase_b_adaptive_median_benchmark PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+
 # Preserve the normal optimized Release configuration while optionally
 # emitting symbols for line- and function-level CPU sampling analysis.
 option(PHASE_A_ENABLE_PROFILING_SYMBOLS "Emit optimized Release profiling symbols" OFF)
@@ -108,6 +131,24 @@ if(MSVC AND PHASE_A_ENABLE_PROFILING_SYMBOLS)
             $<$<CONFIG:Release>:/Zo>
     )
     target_link_options(phase_a_baseline_benchmark
+        PRIVATE
+            $<$<CONFIG:Release>:/DEBUG:FULL>
+            $<$<CONFIG:Release>:/OPT:REF>
+            $<$<CONFIG:Release>:/OPT:ICF>
+    )
+endif()
+
+option(PHASE_B_ENABLE_PROFILING_SYMBOLS
+    "Emit optimized Release symbols for the Phase B benchmark" OFF
+)
+
+if(MSVC AND PHASE_B_ENABLE_PROFILING_SYMBOLS)
+    target_compile_options(phase_b_adaptive_median_benchmark
+        PRIVATE
+            $<$<CONFIG:Release>:/Zi>
+            $<$<CONFIG:Release>:/Zo>
+    )
+    target_link_options(phase_b_adaptive_median_benchmark
         PRIVATE
             $<$<CONFIG:Release>:/DEBUG:FULL>
             $<$<CONFIG:Release>:/OPT:REF>

@@ -2,7 +2,7 @@
 
 This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B has begun with an exact correctness-first native adaptive-median baseline.
 
-The next technical milestone is formal benchmarking and profiling of the unchanged Phase B native baseline; Projects 2–4 remain planned work.
+The next technical milestone is the first isolated Phase B serial optimization: remove temporary window allocations while retaining the established selection and numerical behavior. Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -22,7 +22,8 @@ The next technical milestone is formal benchmarking and profiling of the unchang
 | Persistent CUDA Python ownership | Complete | Non-copyable RAII owner amortizes allocation and transfer costs across repeated calls |
 | Phase A final consolidation | Complete | Public validation matrix, claims, build options, and repository hygiene audited |
 | Phase B adaptive median native baseline | Complete | Public branch fixture and local fixture match the established Python behavior bit for bit |
-| Phase B native benchmark and profile | **Next** | Measure the unchanged C++ baseline before any optimization, OpenMP, or CUDA work |
+| Phase B native benchmark and profile | Complete | Reproducible native timing, branch counters, and source-attributed CPU samples established |
+| Phase B serial optimization 1 | **Next** | Remove temporary window allocations without changing median selection or semantics |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -56,7 +57,8 @@ Python reference
   → persistent-GPU Python ownership [complete]
   → final Phase A validation/report [complete]
   → Phase B correctness-first native C++ [complete]
-  → Phase B native benchmark and profile [next]
+  → Phase B native benchmark and profile [complete]
+  → Phase B allocation-only serial experiment [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -79,6 +81,8 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
         src/cuda_transfer_characterization.cpp
                                  pageable/pinned, residency, and crossover benchmark
         src/adaptive_median.cpp  direct adaptive-median baseline
+        src/adaptive_benchmark.cpp
+                                 native timing and diagnostic-counter harness
         src/adaptive_validation.cpp
                                  public exact Phase B validation executable
     reference_data/public_adaptive/

@@ -132,6 +132,10 @@ The adaptive reference includes a deterministic `(7, 7, 1, 4)` branch test and a
 
 The correctness-first native C++17 baseline was completed on 2026-09-10. It follows the Python control flow directly: separate detector-coordinate planes, global-minimum constant padding, explicit `3 × 3`/`5 × 5`/`7 × 7` windows, odd-count `std::nth_element` medians, strict Stage A/Stage B comparisons, and original-center fallback after the maximum window. The new committed public fixture covers every major branch and matched all 196 values bit for bit; the ignored local fixture matched all 4,096 values. A small local timing check established a 0.5261 ms native median versus 66.4967 ms for the public Python path, but formal benchmarking and profiling intentionally remain next.
 
+The native baseline benchmark/profile was completed on 2026-09-10 using the exact historical centered `(64, 35, 8, 8)` subset (143,360 outputs) derived from the ignored canonical input. One warm-up plus seven Release `/O2` filter-only runs produced a 15.3165 ms median, 15.2896–15.4852 ms range, 0.430% CV, and 9.3598 Moutput/s. Five matching public 4Denoise calls produced a 17.7459 s median. Separate counters found 99.8214% of outputs finished at `3 × 3`; only 0.1786% expanded, all to maximum-window fallback, for 143,872 median computations.
+
+Low-overhead main-thread sampling with optimized symbols attributed 10,482 of 10,517 samples to filter source: median selection 44.16%, per-window temporary-vector allocation/teardown 37.24%, gathering plus min/max 7.89%, plane preparation/indexing 5.65%, and remaining work 5.07%. Shares are directional because sampling perturbs wall time and optimized unwind data groups heap frames at their source call/scope-end sites. The ranked next candidates are fixed stack storage without changing selection, a specialized nine-value selector for the 99.82% common path, then direct-address `3 × 3` gathering. The first experiment will isolate removal of temporary window allocations.
+
 ### Intended contribution
 
 Demonstrate a credible progression from a controlled fixed-window exercise to a measured adaptive bottleneck, then through modern C++, CPU optimization, CUDA, GPU profiling, validation, Python integration, and clear performance reporting.
@@ -265,7 +269,7 @@ All projects currently live in this public parent portfolio, and future work sho
 - [ ] Define the formal benchmark hardware, repetition policy, and problem-size matrix
 - [x] Implement straightforward C++
 - [x] Validate C++ output
-- [ ] Benchmark and profile C++
+- [x] Benchmark and profile C++
 - [ ] Optimize and re-measure the CPU implementation
 - [ ] Implement initial CUDA
 - [ ] Validate and profile CUDA

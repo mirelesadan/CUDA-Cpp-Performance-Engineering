@@ -61,6 +61,7 @@ cpp/
         fixed_median_cuda.hpp
     src/
         adaptive_median.cpp
+        adaptive_benchmark.cpp
         adaptive_validation.cpp
         cuda_benchmark.cpp
         cuda_kernel_benchmark.cpp
@@ -92,6 +93,7 @@ cmake --build cpp/build --config Debug
 cmake --build cpp/build --config Release
 cpp\build\Release\phase_a_fixed_median.exe
 cpp\build\Release\phase_b_adaptive_median_validation.exe
+cpp\build\Release\phase_b_adaptive_median_benchmark.exe
 ```
 
 On this Windows system, CUDA 12.9 is selected explicitly because its Visual Studio build-customization files are installed with the toolkit but not registered under the Visual Studio directory:
@@ -434,6 +436,33 @@ The committed `(7, 7, 1, 4)` public fixture covers retain-center, replace-with-m
 
 For a bounded starting measurement only, three Release native validation executions after an untimed setup check took 0.5819, 0.5261, and 0.4950 ms (0.5261 ms median). One in-process warm-up followed by three corresponding public 4Denoise calls took 66.4967, 67.8741, and 65.7886 ms (66.4967 ms median). This small workload is a correctness and operability baseline, not the formal Phase B benchmark or a profiling result. Algorithm optimization, OpenMP, CUDA, and Python binding work remain future steps.
 
+### Phase B native benchmark and CPU profile — 2026-09-10
+
+The native benchmark reconstructs the earlier Python profiling workload exactly from the ignored canonical input: centered slices `[10:74, 0:35, 59:67, 58:66]` produce a C-contiguous `(64, 35, 8, 8)` finite-`float64` subset with 143,360 outputs. Loading the `(85, 35, 127, 125)` source and extracting the subset occur before timing. On AC power, the unchanged MSVC x64 Release `/O2` filter received one warm-up and seven `steady_clock` calls; each timing contains the filter's internal output and temporary allocations but no file I/O, subset preparation, or diagnostic counters.
+
+| Implementation | Raw times | Median | Min–max | Throughput |
+| --- | --- | ---: | ---: | ---: |
+| native C++ baseline | 15.3791, 15.2987, 15.3929, 15.3165, 15.3034, 15.2896, 15.4852 ms | 15.3165 ms | 15.2896–15.4852 ms | 9.3598 Moutput/s |
+| public 4Denoise reference | 16.9017, 17.6682, 17.8093, 17.7459, 18.4166 s | 17.7459 s | 16.9017–18.4166 s | 0.008078 Moutput/s |
+
+The native mean was 15.3522 ms with 0.430% CV. The Python comparison used the identical in-memory subset, one warm-up, and five public `HyperData.denoise(...)` calls. Its approximately `1,159×` native/Python ratio is specific to this workload and these call boundaries, not a full-canonical extrapolation.
+
+The separate diagnostic path reproduced the timed output bit for bit and reported 143,872 median computations. Of 143,360 outputs, 143,104 (99.8214%) finished at `3 × 3`; 256 (0.1786%) expanded to `5 × 5`, the same 256 expanded to `7 × 7`, and all 256 used maximum-window fallback. No pixel finished successfully at `5 × 5` or `7 × 7`. Stage B retained 115,240 centers (80.3850%) and replaced 27,864 values (19.4364%). Input remained unchanged.
+
+The unchanged baseline was then sampled on its main worker thread with the accepted low-overhead Windows instruction-pointer method at approximately 1 ms. An otherwise normal optimized build added `/Zi /Zo` and full linker symbols; 1,000 repeated calls supplied a stable sampling interval. Stack attribution assigned 10,482 of 10,517 samples to native filter source. Profiler wall time is perturbed and is not benchmark evidence.
+
+| Conservative source/runtime group | Attributed samples | Share |
+| --- | ---: | ---: |
+| `std::nth_element` median selection | 4,629 | 44.16% |
+| per-window temporary-vector allocation/teardown | 3,903 | 37.24% |
+| window gathering plus min/max | 827 | 7.89% |
+| plane minimum/padding/indexing | 592 | 5.65% |
+| validation, adaptive control, loops, and output work | 531 | 5.07% |
+
+Optimized unwind/source records map runtime heap calls to `window.reserve(...)` and the implicit scope-end destruction point, so the allocation/teardown group is reliable in aggregate but not separable more precisely. Plane construction and border padding are minor; adaptive expansion is also rare. This differs from the earlier Python `cProfile`, where `np.median` represented 68.75% and median/min/max together 88.28% of profiled time. Native selection remains largest, but per-output heap traffic emerges as a nearly co-dominant cost that Python function-level profiling did not expose.
+
+The evidence ranks the next serial candidates as: (1) replace the 143,872 temporary window-vector allocations with fixed stack storage while retaining `std::nth_element` and gather order—low-to-medium complexity, low semantic risk, and the cleanest first experiment against the 37.24% heap group; (2) specialize the overwhelmingly common nine-value selection while retaining general 25/49-value paths—medium complexity and medium exactness risk, targeting the 44.16% selection group; (3) use direct padded-row addressing for the common `3 × 3` gather/min/max path—medium complexity and low-to-medium indexing risk, targeting the smaller 13.54% gather/preparation/index group. Padding-specific or general adaptive-branch optimization is not currently justified.
+
 ## Data
 
 Four data roles are deliberately separate:
@@ -514,8 +543,9 @@ Completed reference and organization work:
 - non-copyable `CudaMedianBuffer` RAII ownership with unchanged-kernel, original-input repeated-call semantics and a measured `19.170×` effective ten-operation speedup over repeated copied one-shot Python calls.
 - final public validation covering the regenerated Python reference, retained serial variants, OpenMP, one-shot CUDA, direct Python CPU paths, and persistent CUDA ownership.
 - correctness-first Phase B C++17 adaptive median with exact public 196-value and local 4,096-value validation against the established Python behavior.
+- reproducible Phase B `(64, 35, 8, 8)` native benchmark, separate branch diagnostics, and optimized-symbol CPU sampling that select temporary-window allocation removal as the first isolated optimization.
 
-Phase A status: **complete**. Phase B native baseline status: **complete**. Next: define the formal Phase B native benchmark protocol, benchmark the unchanged C++ baseline, and profile it before optimization.
+Phase A status: **complete**. Phase B native baseline benchmark/profile status: **complete**. Next: test fixed stack storage as an allocation-only serial optimization while leaving median selection and all numerical decisions unchanged.
 
 ## Remaining TBDs
 
