@@ -37,13 +37,23 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_diagnostics(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions);
 
-// Isolated serial candidate: identical algorithm and std::nth_element median
+// Retained isolated serial implementation: identical algorithm and std::nth_element median
 // selection, but each window uses fixed 49-value stack storage.
 std::vector<double> adaptive_median_s3_smax7_stack(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions);
 
 AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_stack_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions);
+
+// Retained isolated serial implementation: fixed stack storage plus a fixed median-of-nine
+// network for 3x3 windows. The rare 5x5 and 7x7 paths retain std::nth_element.
+std::vector<double> adaptive_median_s3_smax7_specialized_3x3(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions);
+
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_specialized_3x3_diagnostics(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions);
 

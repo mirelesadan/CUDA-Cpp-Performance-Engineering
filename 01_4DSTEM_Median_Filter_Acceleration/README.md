@@ -490,6 +490,31 @@ The optimized-symbol reprofile collected 6,630 main-thread samples and attribute
 
 Per-window allocation/teardown no longer formed a measurable source group; no unexpected replacement hotspot appeared. Because 99.8214% of outputs still terminate at `3 × 3` and median selection is now dominant, the next isolated experiment is a fixed nine-value selector for that common path while retaining `std::nth_element` for the rare `5 × 5` and `7 × 7` windows.
 
+### Phase B specialized nine-value median selection — 2026-09-10
+
+The second isolated adaptive optimization keeps the fixed-stack-plus-`std::nth_element` path callable and adds `adaptive_median_s3_smax7_specialized_3x3(...)`. Only a nine-value window enters the same 19-comparator compare/swap network established in Phase A; 25- and 49-value windows still use `std::nth_element`. Stack storage, gathering order, min/max work, padding, strict Stage A/B decisions, expansion, fallback, indexing, and output behavior are shared unchanged.
+
+Before adaptive integration was accepted, the selector matched a sorted reference for all 362,880 permutations of nine distinct ranks and matched `std::nth_element` for ten representative duplicate-value patterns. The 196-value public fixture, ignored 4,096-value local fixture, and all 143,360 representative outputs then matched the fixed-stack baseline bit for bit. Input remained unchanged and every diagnostic field matched, including the 143,104/256 initial-completion/fallback split, 115,240/27,864 Stage B retain/replace counts, and 143,872 median computations. Phase A validation also remained exact.
+
+The authoritative benchmark used AC power, Release `/O2`, the established logical-processor-0 affinity, alternating implementation order, one warm-up, and seven filter-only calls per implementation.
+
+| Implementation | Raw times | Median | Min–max | Throughput |
+| --- | --- | ---: | ---: | ---: |
+| fixed stack + `std::nth_element` | 11.3971, 11.4973, 11.3629, 11.5004, 11.3384, 11.3670, 11.4625 ms | 11.3971 ms | 11.3384–11.5004 ms | 12.5786 Moutput/s |
+| specialized `3 × 3` selector | 8.6412, 8.6053, 9.1272, 9.6448, 8.6485, 8.6934, 8.7995 ms | 8.6934 ms | 8.6053–9.6448 ms | 16.4907 Moutput/s |
+
+The retained specialized path is `1.311006×` faster, a 23.7227% runtime reduction. The optimized-symbol reprofile collected 5,365 main-thread samples, with one failed observation, and attributed 5,328 to filter source; profiler wall time was perturbed and excluded from benchmark evidence.
+
+| Conservative source/runtime group | Attributed samples | Share |
+| --- | ---: | ---: |
+| fixed network plus rare larger-window median selection | 3,291 | 61.77% |
+| window gathering plus min/max | 757 | 14.21% |
+| plane preparation and index/address work | 726 | 13.63% |
+| adaptive control, loops, and output store | 358 | 6.72% |
+| validation and output allocation | 196 | 3.68% |
+
+Median selection fell by 7.50 percentage points from 69.27% but remains the largest category. The fixed network already removes general-purpose selection from 99.8214% of outputs, so another median micro-optimization is not the next priority. Gathering/min-max and plane/index work now total 27.84%; the next isolated experiment is direct padded-row addressing for the common `3 × 3` gather while preserving all values and decisions.
+
 ## Data
 
 Four data roles are deliberately separate:
@@ -522,7 +547,7 @@ reference_data/
         README.md
 ```
 
-Both public pairs are finite, C-contiguous `float64` data generated solely from deterministic integer-valued constructions. The Phase A executable checks its retained serial and OpenMP implementations; the Phase B executable checks both the straightforward adaptive baseline and fixed-stack implementation. Both compare expected output bit for bit. The larger historical fixtures are not distributed.
+Both public pairs are finite, C-contiguous `float64` data generated solely from deterministic integer-valued constructions. The Phase A executable checks its retained serial and OpenMP implementations; the Phase B executable checks the straightforward adaptive baseline, fixed-stack baseline, specialized selector, and the selector's exhaustive permutation test. Both compare expected output bit for bit. The larger historical fixtures are not distributed.
 
 ## Regenerating the canonical input
 
@@ -540,7 +565,7 @@ For authorized local scientific work, place the experimental source outside vers
 
 Phase A completed the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
 
-Phase B is the main progression: the exact adaptive contract is reproduced in clear C++, its native baseline is profiled, and fixed stack storage has removed the measured per-window allocation bottleneck without changing selection or numerical behavior. Specialized nine-value median selection is next; OpenMP and CUDA remain later stages.
+Phase B is the main progression: the exact adaptive contract is reproduced in clear C++, its native baseline is profiled, and fixed stack storage plus specialized nine-value selection have addressed the two largest measured costs without changing numerical behavior. Direct padded-row gathering is next; OpenMP and CUDA remain later stages.
 
 ## Status
 
@@ -572,8 +597,9 @@ Completed reference and organization work:
 - correctness-first Phase B C++17 adaptive median with exact public 196-value and local 4,096-value validation against the established Python behavior.
 - reproducible Phase B `(64, 35, 8, 8)` native benchmark, separate branch diagnostics, and optimized-symbol CPU sampling that select temporary-window allocation removal as the first isolated optimization.
 - retained Phase B fixed-stack window storage with exact fixture/workload and branch-counter equivalence, a measured `1.408914×` speedup, and a reprofile showing median selection at 69.27%.
+- retained Phase B specialized `3 × 3` selection with exhaustive 362,880-permutation verification, exact adaptive equivalence, a measured `1.311006×` speedup, and a reprofile selecting direct-row gathering next.
 
-Phase A status: **complete**. Phase B fixed-stack storage status: **complete**. Next: isolate specialized nine-value median selection for the 99.8214% `3 × 3` common path while retaining the general larger-window behavior.
+Phase A status: **complete**. Phase B specialized nine-value selection status: **complete**. Next: isolate direct padded-row gathering for the 99.8214% `3 × 3` common path without changing neighborhood or decision semantics.
 
 ## Remaining TBDs
 

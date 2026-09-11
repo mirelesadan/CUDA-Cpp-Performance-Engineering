@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +15,7 @@
 #include <vector>
 
 #include "adaptive_median.hpp"
+#include "adaptive_median_detail.hpp"
 #include "npy.hpp"
 
 #ifndef PHASE_B_REFERENCE_INPUT_PATH
@@ -126,11 +129,60 @@ std::size_t count_statistic_mismatches(
         (left.median_computations != right.median_computations);
 }
 
+struct SelectorVerification {
+    std::size_t permutations = 0;
+    std::size_t permutation_mismatches = 0;
+    std::size_t duplicate_cases = 0;
+    std::size_t duplicate_mismatches = 0;
+};
+
+double sorted_median(std::array<double, 9> values)
+{
+    std::sort(values.begin(), values.end());
+    return values[4];
+}
+
+SelectorVerification verify_median_of_nine()
+{
+    SelectorVerification result;
+    std::array<double, 9> permutation = {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0};
+    do {
+        std::array<double, 9> candidate = permutation;
+        const double expected = sorted_median(permutation);
+        const double actual = phase_b::detail::median_of_nine_in_place(candidate.data());
+        ++result.permutations;
+        result.permutation_mismatches += double_bits(actual) != double_bits(expected);
+    } while (std::next_permutation(permutation.begin(), permutation.end()));
+
+    const std::array<std::array<double, 9>, 10> duplicate_inputs = {{
+        {{4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0}},
+        {{0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0}},
+        {{-2.0, -2.0, -2.0, 3.0, 3.0, 3.0, 9.0, 9.0, 9.0}},
+        {{7.0, 1.0, 7.0, 1.0, 7.0, 1.0, 7.0, 1.0, 7.0}},
+        {{-5.0, 2.0, -5.0, 2.0, -5.0, 2.0, 8.0, 8.0, 8.0}},
+        {{10.0, -1.0, -1.0, -1.0, 10.0, 10.0, 3.0, 3.0, 3.0}},
+        {{2.5, 2.5, -4.5, -4.5, 0.0, 0.0, 9.5, 9.5, 9.5}},
+        {{100.0, 0.0, 0.0, 0.0, 0.0, -100.0, -100.0, -100.0, -100.0}},
+        {{-3.0, 6.0, -3.0, 6.0, 1.0, 1.0, 1.0, 1.0, 1.0}},
+        {{8.0, 8.0, 8.0, -8.0, -8.0, -8.0, 0.25, 0.25, 0.25}},
+    }};
+    for (const std::array<double, 9>& input : duplicate_inputs) {
+        std::array<double, 9> candidate = input;
+        std::array<double, 9> reference = input;
+        std::nth_element(reference.begin(), reference.begin() + 4, reference.end());
+        const double actual = phase_b::detail::median_of_nine_in_place(candidate.data());
+        ++result.duplicate_cases;
+        result.duplicate_mismatches += double_bits(actual) != double_bits(reference[4]);
+    }
+    return result;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
     try {
+        const SelectorVerification selector_verification = verify_median_of_nine();
         if (argc > 3) {
             throw std::runtime_error(
                 "Usage: phase_b_adaptive_median_validation.exe [input.npy] [reference_output.npy]");
@@ -164,11 +216,21 @@ int main(int argc, char* argv[])
             input.array.data,
             dimensions);
         const auto stack_stop = std::chrono::steady_clock::now();
+        const auto specialized_start = std::chrono::steady_clock::now();
+        const std::vector<double> specialized =
+            phase_b::adaptive_median_s3_smax7_specialized_3x3(
+                input.array.data,
+                dimensions);
+        const auto specialized_stop = std::chrono::steady_clock::now();
 
         const phase_b::AdaptiveMedianDiagnosticResult baseline_diagnostic =
             phase_b::adaptive_median_s3_smax7_diagnostics(input.array.data, dimensions);
         const phase_b::AdaptiveMedianDiagnosticResult stack_diagnostic =
             phase_b::adaptive_median_s3_smax7_stack_diagnostics(input.array.data, dimensions);
+        const phase_b::AdaptiveMedianDiagnosticResult specialized_diagnostic =
+            phase_b::adaptive_median_s3_smax7_specialized_3x3_diagnostics(
+                input.array.data,
+                dimensions);
 
         const std::size_t baseline_reference_mismatches =
             count_bitwise_mismatches(baseline, reference.array.data);
@@ -176,17 +238,25 @@ int main(int argc, char* argv[])
             count_bitwise_mismatches(stack, reference.array.data);
         const std::size_t baseline_stack_mismatches =
             count_bitwise_mismatches(baseline, stack);
+        const std::size_t specialized_reference_mismatches =
+            count_bitwise_mismatches(specialized, reference.array.data);
+        const std::size_t stack_specialized_mismatches =
+            count_bitwise_mismatches(stack, specialized);
         const std::size_t baseline_diagnostic_mismatches =
             count_bitwise_mismatches(baseline, baseline_diagnostic.output);
         const std::size_t stack_diagnostic_mismatches =
             count_bitwise_mismatches(stack, stack_diagnostic.output);
         const std::size_t statistic_mismatches = count_statistic_mismatches(
             baseline_diagnostic.statistics, stack_diagnostic.statistics);
+        const std::size_t specialized_diagnostic_mismatches =
+            count_bitwise_mismatches(specialized, specialized_diagnostic.output);
+        const std::size_t specialized_statistic_mismatches = count_statistic_mismatches(
+            stack_diagnostic.statistics, specialized_diagnostic.statistics);
 
-        std::size_t first_mismatch = stack.size();
-        for (std::size_t index = 0; index < stack.size(); ++index) {
-            if (double_bits(stack[index]) != double_bits(reference.array.data[index])) {
-                if (first_mismatch == stack.size()) {
+        std::size_t first_mismatch = specialized.size();
+        for (std::size_t index = 0; index < specialized.size(); ++index) {
+            if (double_bits(specialized[index]) != double_bits(reference.array.data[index])) {
+                if (first_mismatch == specialized.size()) {
                     first_mismatch = index;
                 }
             }
@@ -201,6 +271,14 @@ int main(int argc, char* argv[])
         std::cout << "Project 1 Phase B correctness-first adaptive median validation\n"
                   << "Shape: (" << input.array.shape[0] << ", " << input.array.shape[1]
                   << ", " << input.array.shape[2] << ", " << input.array.shape[3] << ")\n"
+                  << "Median-of-nine distinct permutations checked: "
+                  << selector_verification.permutations << '\n'
+                  << "Median-of-nine permutation mismatches: "
+                  << selector_verification.permutation_mismatches << '\n'
+                  << "Median-of-nine duplicate cases checked: "
+                  << selector_verification.duplicate_cases << '\n'
+                  << "Median-of-nine duplicate mismatches: "
+                  << selector_verification.duplicate_mismatches << '\n'
                   << "Elements compared: " << input.element_count << '\n'
                   << "Heap baseline-vs-reference mismatches: "
                   << baseline_reference_mismatches << '\n'
@@ -208,11 +286,19 @@ int main(int argc, char* argv[])
                   << stack_reference_mismatches << '\n'
                   << "Heap baseline-vs-stack candidate mismatches: "
                   << baseline_stack_mismatches << '\n'
+                  << "Specialized-vs-reference mismatches: "
+                  << specialized_reference_mismatches << '\n'
+                  << "Stack baseline-vs-specialized mismatches: "
+                  << stack_specialized_mismatches << '\n'
                   << "Heap diagnostic-vs-normal mismatches: "
                   << baseline_diagnostic_mismatches << '\n'
                   << "Stack diagnostic-vs-normal mismatches: "
                   << stack_diagnostic_mismatches << '\n'
-                  << "Branch-statistic field mismatches: " << statistic_mismatches << '\n'
+                  << "Specialized diagnostic-vs-normal mismatches: "
+                  << specialized_diagnostic_mismatches << '\n'
+                  << "Heap-vs-stack statistic field mismatches: " << statistic_mismatches << '\n'
+                  << "Stack-vs-specialized statistic field mismatches: "
+                  << specialized_statistic_mismatches << '\n'
                   << "Input bitwise changes: " << input_mismatches << '\n'
                   << std::fixed << std::setprecision(6)
                   << "Heap filter time: "
@@ -220,9 +306,12 @@ int main(int argc, char* argv[])
                          baseline_stop - baseline_start).count() << " ms\n"
                   << "Stack filter time: "
                   << std::chrono::duration<double, std::milli>(
-                         stack_stop - stack_start).count() << " ms\n";
+                         stack_stop - stack_start).count() << " ms\n"
+                  << "Specialized filter time: "
+                  << std::chrono::duration<double, std::milli>(
+                         specialized_stop - specialized_start).count() << " ms\n";
 
-        if (first_mismatch != stack.size()) {
+        if (first_mismatch != specialized.size()) {
             const std::size_t detector_x = first_mismatch % input.array.shape[3];
             std::size_t remaining = first_mismatch / input.array.shape[3];
             const std::size_t detector_y = remaining % input.array.shape[2];
@@ -232,18 +321,26 @@ int main(int argc, char* argv[])
             std::cout << "First mismatch: flat index " << first_mismatch
                       << " at (" << scan_y << ", " << scan_x << ", "
                       << detector_y << ", " << detector_x << ")"
-                      << ", stack bits 0x" << std::hex << double_bits(stack[first_mismatch])
+                      << ", specialized bits 0x" << std::hex
+                      << double_bits(specialized[first_mismatch])
                       << ", expected bits 0x"
                       << double_bits(reference.array.data[first_mismatch]) << std::dec << '\n';
         }
 
         const bool passed =
+            selector_verification.permutations == 362880 &&
+            selector_verification.permutation_mismatches == 0 &&
+            selector_verification.duplicate_mismatches == 0 &&
             baseline_reference_mismatches == 0 &&
             stack_reference_mismatches == 0 &&
             baseline_stack_mismatches == 0 &&
+            specialized_reference_mismatches == 0 &&
+            stack_specialized_mismatches == 0 &&
             baseline_diagnostic_mismatches == 0 &&
             stack_diagnostic_mismatches == 0 &&
+            specialized_diagnostic_mismatches == 0 &&
             statistic_mismatches == 0 &&
+            specialized_statistic_mismatches == 0 &&
             input_mismatches == 0;
         std::cout << "Validation result: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;

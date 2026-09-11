@@ -259,25 +259,33 @@ int main(int argc, char* argv[])
 {
     try {
         std::filesystem::path input_path = PHASE_B_BENCHMARK_INPUT_PATH;
-        enum class ProfileImplementation { none, heap, stack };
+        enum class ProfileImplementation { none, heap, stack, specialized };
         ProfileImplementation profile_implementation = ProfileImplementation::none;
         std::size_t profile_runs = 0;
         for (int argument = 1; argument < argc; ++argument) {
             const std::string value = argv[argument];
-            if (value == "--profile-runs" || value == "--profile-stack-runs") {
+            if (value == "--profile-runs" || value == "--profile-stack-runs" ||
+                value == "--profile-specialized-runs") {
                 if (++argument >= argc || profile_implementation != ProfileImplementation::none) {
                     throw std::runtime_error(
                         "A profiling option requires one positive count and may appear once.");
                 }
                 profile_runs = parse_positive_count(argv[argument]);
-                profile_implementation = value == "--profile-runs"
-                    ? ProfileImplementation::heap
-                    : ProfileImplementation::stack;
+                if (value == "--profile-runs") {
+                    profile_implementation = ProfileImplementation::heap;
+                }
+                else if (value == "--profile-stack-runs") {
+                    profile_implementation = ProfileImplementation::stack;
+                }
+                else {
+                    profile_implementation = ProfileImplementation::specialized;
+                }
             }
             else if (input_path != std::filesystem::path(PHASE_B_BENCHMARK_INPUT_PATH)) {
                 throw std::runtime_error(
                     "Usage: phase_b_adaptive_median_benchmark.exe [input.npy] "
-                    "[--profile-runs N | --profile-stack-runs N]");
+                    "[--profile-runs N | --profile-stack-runs N | "
+                    "--profile-specialized-runs N]");
             }
             else {
                 input_path = value;
@@ -293,88 +301,96 @@ int main(int argc, char* argv[])
             loaded.array.data, source_dimensions, dimensions, slices);
         const std::vector<double> original_input = input;
 
-        std::vector<double> heap_output = phase_b::adaptive_median_s3_smax7(input, dimensions);
-        std::vector<double> stack_output =
-            phase_b::adaptive_median_s3_smax7_stack(input, dimensions);
         if (profile_implementation != ProfileImplementation::none) {
+            std::vector<double> profile_output;
+            const auto run_profile_filter = [&] {
+                if (profile_implementation == ProfileImplementation::heap) {
+                    return phase_b::adaptive_median_s3_smax7(input, dimensions);
+                }
+                if (profile_implementation == ProfileImplementation::stack) {
+                    return phase_b::adaptive_median_s3_smax7_stack(input, dimensions);
+                }
+                return phase_b::adaptive_median_s3_smax7_specialized_3x3(input, dimensions);
+            };
+            profile_output = run_profile_filter();
             volatile double checksum = 0.0;
             for (std::size_t run = 0; run < profile_runs; ++run) {
-                if (profile_implementation == ProfileImplementation::heap) {
-                    heap_output = phase_b::adaptive_median_s3_smax7(input, dimensions);
-                    checksum += heap_output[run % heap_output.size()];
-                }
-                else {
-                    stack_output = phase_b::adaptive_median_s3_smax7_stack(input, dimensions);
-                    checksum += stack_output[run % stack_output.size()];
-                }
+                profile_output = run_profile_filter();
+                checksum += profile_output[run % profile_output.size()];
             }
+            const char* implementation =
+                profile_implementation == ProfileImplementation::heap ? "heap" :
+                profile_implementation == ProfileImplementation::stack ? "stack" :
+                "specialized-3x3";
             std::cout << "Phase B adaptive profiling workload complete\n"
-                      << "Implementation: "
-                      << (profile_implementation == ProfileImplementation::heap ? "heap" : "stack")
-                      << '\n'
+                      << "Implementation: " << implementation << '\n'
                       << "Profile filter calls: " << profile_runs << '\n'
                       << "Checksum: " << checksum << '\n';
             return 0;
         }
 
-        std::vector<double> heap_timings_ms;
-        std::vector<double> stack_timings_ms;
-        heap_timings_ms.reserve(default_timed_runs);
-        stack_timings_ms.reserve(default_timed_runs);
+        std::vector<double> baseline_output =
+            phase_b::adaptive_median_s3_smax7_stack(input, dimensions);
+        std::vector<double> specialized_output =
+            phase_b::adaptive_median_s3_smax7_specialized_3x3(input, dimensions);
+        std::vector<double> baseline_timings_ms;
+        std::vector<double> specialized_timings_ms;
+        baseline_timings_ms.reserve(default_timed_runs);
+        specialized_timings_ms.reserve(default_timed_runs);
 
-        const auto time_heap = [&] {
-            const auto start = std::chrono::steady_clock::now();
-            std::vector<double> run_output =
-                phase_b::adaptive_median_s3_smax7(input, dimensions);
-            const auto stop = std::chrono::steady_clock::now();
-            heap_timings_ms.push_back(
-                std::chrono::duration<double, std::milli>(stop - start).count());
-            heap_output = std::move(run_output);
-        };
-        const auto time_stack = [&] {
+        const auto time_baseline = [&] {
             const auto start = std::chrono::steady_clock::now();
             std::vector<double> run_output =
                 phase_b::adaptive_median_s3_smax7_stack(input, dimensions);
             const auto stop = std::chrono::steady_clock::now();
-            stack_timings_ms.push_back(
+            baseline_timings_ms.push_back(
                 std::chrono::duration<double, std::milli>(stop - start).count());
-            stack_output = std::move(run_output);
+            baseline_output = std::move(run_output);
+        };
+        const auto time_specialized = [&] {
+            const auto start = std::chrono::steady_clock::now();
+            std::vector<double> run_output =
+                phase_b::adaptive_median_s3_smax7_specialized_3x3(input, dimensions);
+            const auto stop = std::chrono::steady_clock::now();
+            specialized_timings_ms.push_back(
+                std::chrono::duration<double, std::milli>(stop - start).count());
+            specialized_output = std::move(run_output);
         };
 
         for (std::size_t run = 0; run < default_timed_runs; ++run) {
             if (run % 2 == 0) {
-                time_heap();
-                time_stack();
+                time_baseline();
+                time_specialized();
             }
             else {
-                time_stack();
-                time_heap();
+                time_specialized();
+                time_baseline();
             }
         }
 
-        const TimingSummary heap_summary = summarize_timings(heap_timings_ms);
-        const TimingSummary stack_summary = summarize_timings(stack_timings_ms);
-        const phase_b::AdaptiveMedianDiagnosticResult heap_diagnostic =
-            phase_b::adaptive_median_s3_smax7_diagnostics(input, dimensions);
-        const phase_b::AdaptiveMedianDiagnosticResult stack_diagnostic =
+        const TimingSummary baseline_summary = summarize_timings(baseline_timings_ms);
+        const TimingSummary specialized_summary = summarize_timings(specialized_timings_ms);
+        const phase_b::AdaptiveMedianDiagnosticResult baseline_diagnostic =
             phase_b::adaptive_median_s3_smax7_stack_diagnostics(input, dimensions);
-        const std::size_t heap_stack_mismatches =
-            count_bitwise_mismatches(heap_output, stack_output);
-        const std::size_t heap_diagnostic_mismatches =
-            count_bitwise_mismatches(heap_output, heap_diagnostic.output);
-        const std::size_t stack_diagnostic_mismatches =
-            count_bitwise_mismatches(stack_output, stack_diagnostic.output);
+        const phase_b::AdaptiveMedianDiagnosticResult specialized_diagnostic =
+            phase_b::adaptive_median_s3_smax7_specialized_3x3_diagnostics(input, dimensions);
+        const std::size_t baseline_specialized_mismatches =
+            count_bitwise_mismatches(baseline_output, specialized_output);
+        const std::size_t baseline_diagnostic_mismatches =
+            count_bitwise_mismatches(baseline_output, baseline_diagnostic.output);
+        const std::size_t specialized_diagnostic_mismatches =
+            count_bitwise_mismatches(specialized_output, specialized_diagnostic.output);
         const std::size_t statistic_mismatches = count_statistic_mismatches(
-            heap_diagnostic.statistics, stack_diagnostic.statistics);
+            baseline_diagnostic.statistics, specialized_diagnostic.statistics);
         const std::size_t input_changes = count_bitwise_mismatches(input, original_input);
 
-        const phase_b::AdaptiveMedianStatistics& statistics = heap_diagnostic.statistics;
-        const double speedup = heap_summary.median_ms / stack_summary.median_ms;
+        const phase_b::AdaptiveMedianStatistics& statistics = baseline_diagnostic.statistics;
+        const double speedup = baseline_summary.median_ms / specialized_summary.median_ms;
         const double runtime_reduction =
-            100.0 * (heap_summary.median_ms - stack_summary.median_ms) /
-            heap_summary.median_ms;
+            100.0 * (baseline_summary.median_ms - specialized_summary.median_ms) /
+            baseline_summary.median_ms;
         std::cout << std::fixed << std::setprecision(6)
-                  << "Project 1 Phase B adaptive fixed-stack A/B benchmark\n"
+                  << "Project 1 Phase B specialized 3x3 median A/B benchmark\n"
                   << "Input path: " << input_path.string() << '\n'
                   << "Source shape: (" << source_dimensions.scan_y << ", "
                   << source_dimensions.scan_x << ", " << source_dimensions.detector_y
@@ -388,18 +404,26 @@ int main(int argc, char* argv[])
                   << ", " << dimensions.detector_y << ", " << dimensions.detector_x << ")\n"
                   << "Output elements: " << input.size() << '\n'
                   << "Warm-up filter calls per implementation: 1\n"
-                  << "Timed filter calls per implementation: " << heap_timings_ms.size() << '\n';
+                  << "Timed filter calls per implementation: "
+                  << baseline_timings_ms.size() << '\n';
         print_timing_results(
-            "Heap baseline", heap_timings_ms, heap_summary, input.size());
+            "Fixed-stack nth_element baseline",
+            baseline_timings_ms,
+            baseline_summary,
+            input.size());
         print_timing_results(
-            "Fixed stack", stack_timings_ms, stack_summary, input.size());
-        std::cout << "Fixed-stack speedup: " << speedup << "x\n"
-                  << "Fixed-stack runtime reduction (%): " << runtime_reduction << '\n'
-                  << "Heap-vs-stack bitwise mismatches: " << heap_stack_mismatches << '\n'
-                  << "Heap diagnostic-vs-timed bitwise mismatches: "
-                  << heap_diagnostic_mismatches << '\n'
-                  << "Stack diagnostic-vs-timed bitwise mismatches: "
-                  << stack_diagnostic_mismatches << '\n'
+            "Specialized 3x3",
+            specialized_timings_ms,
+            specialized_summary,
+            input.size());
+        std::cout << "Specialized speedup: " << speedup << "x\n"
+                  << "Specialized runtime reduction (%): " << runtime_reduction << '\n'
+                  << "Baseline-vs-specialized bitwise mismatches: "
+                  << baseline_specialized_mismatches << '\n'
+                  << "Baseline diagnostic-vs-timed bitwise mismatches: "
+                  << baseline_diagnostic_mismatches << '\n'
+                  << "Specialized diagnostic-vs-timed bitwise mismatches: "
+                  << specialized_diagnostic_mismatches << '\n'
                   << "Adaptive-statistic field mismatches: " << statistic_mismatches << '\n'
                   << "Input bitwise changes: " << input_changes << '\n'
                   << "Finished at 3x3: " << statistics.finished_at_3x3 << " ("
@@ -424,16 +448,19 @@ int main(int argc, char* argv[])
                   << "%)\n"
                   << "Median computations: " << statistics.median_computations << '\n'
                   << "Validation result: "
-                  << (heap_stack_mismatches == 0 && heap_diagnostic_mismatches == 0 &&
-                              stack_diagnostic_mismatches == 0 && statistic_mismatches == 0 &&
+                  << (baseline_specialized_mismatches == 0 &&
+                              baseline_diagnostic_mismatches == 0 &&
+                              specialized_diagnostic_mismatches == 0 &&
+                              statistic_mismatches == 0 &&
                               input_changes == 0
                           ? "PASS"
                           : "FAIL")
                   << '\n';
 
-        return heap_stack_mismatches == 0 && heap_diagnostic_mismatches == 0 &&
-                stack_diagnostic_mismatches == 0 && statistic_mismatches == 0 &&
-                input_changes == 0
+        return baseline_specialized_mismatches == 0 &&
+                baseline_diagnostic_mismatches == 0 &&
+                specialized_diagnostic_mismatches == 0 &&
+                statistic_mismatches == 0 && input_changes == 0
             ? 0
             : 1;
     }

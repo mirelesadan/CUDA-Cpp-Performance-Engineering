@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, a CPU profile, and its first retained serial optimization.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, a CPU profile, and two retained serial optimizations.
 
-The next technical milestone is an isolated Phase B nine-value median-selection experiment for the overwhelmingly common `3 × 3` path. Projects 2–4 remain planned work.
+The next technical milestone is an isolated Phase B direct padded-row gathering experiment for the overwhelmingly common `3 × 3` path. Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -24,7 +24,8 @@ The next technical milestone is an isolated Phase B nine-value median-selection 
 | Phase B adaptive median native baseline | Complete | Public branch fixture and local fixture match the established Python behavior bit for bit |
 | Phase B native benchmark and profile | Complete | Reproducible native timing, branch counters, and source-attributed CPU samples established |
 | Phase B fixed-stack storage | Complete | Removed per-window heap allocation with exact semantics and a measured `1.409×` speedup |
-| Phase B median-selection experiment | **Next** | Specialize the nine-value common path while retaining general `25`/`49`-value behavior |
+| Phase B specialized 3×3 selection | Complete | Exhaustively verified 19-comparator network produced a measured `1.311×` speedup |
+| Phase B direct-row gathering | **Next** | Reduce common-path gathering/address work without changing neighborhood semantics |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -60,7 +61,8 @@ Python reference
   → Phase B correctness-first native C++ [complete]
   → Phase B native benchmark and profile [complete]
   → Phase B fixed-stack storage [complete]
-  → Phase B nine-value selection experiment [next]
+  → Phase B specialized nine-value selection [complete]
+  → Phase B direct-row gathering experiment [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -72,6 +74,8 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
     cpp/                         C++17 serial/OpenMP/CUDA source and CMake build
         include/adaptive_median.hpp
                                  correctness-first Phase B native API
+        include/adaptive_median_detail.hpp
+                                 independently tested Phase B selector primitive
         include/fixed_median_cuda.hpp
                                  CUDA interface, RAII owner, and timing result types
         src/fixed_median_cuda.cu baseline kernel, one-shot path, and resident buffers
@@ -82,7 +86,7 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
                                  reusable-buffer steady-state kernel benchmark
         src/cuda_transfer_characterization.cpp
                                  pageable/pinned, residency, and crossover benchmark
-        src/adaptive_median.cpp  heap baseline and fixed-stack adaptive path
+        src/adaptive_median.cpp  retained adaptive baselines and optimized path
         src/adaptive_benchmark.cpp
                                  native timing and diagnostic-counter harness
         src/adaptive_validation.cpp

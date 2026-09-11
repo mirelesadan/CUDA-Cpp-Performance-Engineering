@@ -1,4 +1,5 @@
 #include "adaptive_median.hpp"
+#include "adaptive_median_detail.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,42 @@
 #include <vector>
 
 namespace phase_b {
+namespace detail {
+
+double median_of_nine_in_place(double* values)
+{
+    const auto compare_swap = [](double& left, double& right) {
+        if (right < left) {
+            std::swap(left, right);
+        }
+    };
+
+    // The verified Phase A 19-comparator selection network. It places the
+    // fifth ordered value at index 4 without fully sorting the other values.
+    compare_swap(values[1], values[2]);
+    compare_swap(values[4], values[5]);
+    compare_swap(values[7], values[8]);
+    compare_swap(values[0], values[1]);
+    compare_swap(values[3], values[4]);
+    compare_swap(values[6], values[7]);
+    compare_swap(values[1], values[2]);
+    compare_swap(values[4], values[5]);
+    compare_swap(values[7], values[8]);
+    compare_swap(values[0], values[3]);
+    compare_swap(values[5], values[8]);
+    compare_swap(values[4], values[7]);
+    compare_swap(values[3], values[6]);
+    compare_swap(values[1], values[4]);
+    compare_swap(values[2], values[5]);
+    compare_swap(values[4], values[7]);
+    compare_swap(values[4], values[2]);
+    compare_swap(values[6], values[4]);
+    compare_swap(values[4], values[2]);
+    return values[4];
+}
+
+} // namespace detail
+
 namespace {
 
 constexpr std::size_t padding = 3;
@@ -71,9 +108,10 @@ private:
     std::vector<double> values_;
 };
 
-class StackWindowStorage {
+template <bool specialize_nine>
+class FixedWindowStorage {
 public:
-    explicit StackWindowStorage(std::size_t capacity)
+    explicit FixedWindowStorage(std::size_t capacity)
     {
         if (capacity > values_.size()) {
             throw std::logic_error("Adaptive window exceeds fixed stack capacity.");
@@ -87,6 +125,11 @@ public:
 
     double median()
     {
+        if constexpr (specialize_nine) {
+            if (size_ == 9) {
+                return detail::median_of_nine_in_place(values_.data());
+            }
+        }
         const auto middle = values_.begin() + static_cast<std::ptrdiff_t>(size_ / 2);
         const auto end = values_.begin() + static_cast<std::ptrdiff_t>(size_);
         std::nth_element(values_.begin(), middle, end);
@@ -97,6 +140,9 @@ private:
     std::array<double, 49> values_;
     std::size_t size_ = 0;
 };
+
+using StackWindowStorage = FixedWindowStorage<false>;
+using SpecializedStackWindowStorage = FixedWindowStorage<true>;
 
 template <bool collect_statistics, typename WindowStorage>
 std::vector<double> adaptive_median_impl(
@@ -278,6 +324,25 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_stack_diagnostics(
 {
     AdaptiveMedianDiagnosticResult result;
     result.output = adaptive_median_impl<true, StackWindowStorage>(
+        input, dimensions, result.statistics);
+    return result;
+}
+
+std::vector<double> adaptive_median_s3_smax7_specialized_3x3(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    AdaptiveMedianStatistics unused_statistics;
+    return adaptive_median_impl<false, SpecializedStackWindowStorage>(
+        input, dimensions, unused_statistics);
+}
+
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_specialized_3x3_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    AdaptiveMedianDiagnosticResult result;
+    result.output = adaptive_median_impl<true, SpecializedStackWindowStorage>(
         input, dimensions, result.statistics);
     return result;
 }
