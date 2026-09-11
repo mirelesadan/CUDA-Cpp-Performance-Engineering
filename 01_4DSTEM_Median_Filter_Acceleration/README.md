@@ -100,7 +100,7 @@ On this Windows system, CUDA 12.9 is selected explicitly because its Visual Stud
 
 ```bat
 cmake -S cpp -B cpp/out/cuda -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPHASE_A_ENABLE_CUDA=ON -DPHASE_A_CUDA_ARCHITECTURES=89
-cmake --build cpp/out/cuda --config Release --target phase_a_cuda_validation phase_a_cuda_benchmark phase_a_cuda_kernel_benchmark phase_a_cuda_transfer_characterization
+cmake --build cpp/out/cuda --config Release --target phase_a_cuda_validation phase_a_cuda_benchmark phase_a_cuda_kernel_benchmark phase_a_cuda_transfer_characterization phase_b_adaptive_cuda_validation phase_b_adaptive_cuda_benchmark
 cpp\out\cuda\Release\phase_a_cuda_validation.exe
 cpp\out\cuda\Release\phase_a_cuda_benchmark.exe
 cpp\out\cuda\Release\phase_a_cuda_kernel_benchmark.exe
@@ -558,6 +558,18 @@ The canonical workload was selected for scaling because the historical subset is
 
 OpenMP-1 differed from serial by only 1.66%, within the observed variability, so no meaningful framework penalty is established. Scaling is near-linear through two threads, remains strong at four, and shows diminishing returns from eight onward. Sixteen threads was best; 20 threads was 5.42% slower, so the final logical-thread region provided no benefit in this run. Static scheduling assigns 992 or 993 detector planes per thread at 16 threads, while only 0.1472% of canonical outputs expand beyond `3 × 3` and extra median computations are 0.2877% of output count. Those measurements do not indicate meaningful adaptive-work imbalance. Cache, memory-system, and hybrid-core effects are plausible explanations for flattening but were not profiled. The OpenMP path is retained, and the next experiment is a correctness-first adaptive CUDA baseline.
 
+### Phase B correctness-first adaptive CUDA baseline — 2026-09-11
+
+The opt-in CUDA baseline preserves the CPU numerical contract in two deliberately direct stages. A one-thread-per-detector-coordinate kernel scans each complete scan plane for its global minimum. A second one-thread-per-output kernel gathers `3 × 3`, `5 × 5`, or `7 × 7` values directly from the C-order input and substitutes that plane minimum for coordinates in the conceptual three-pixel constant border. It applies the same 19-comparator nine-value selector, straightforward larger-window median selection, strict Stage A/B comparisons, and original-center fallback. Both kernels use one-dimensional 256-thread blocks; the canonical launch uses 63 plane-minimum blocks and 184,485 adaptive-filter blocks. No shared memory, persistent application ownership, streams, or GPU-specific adaptive shortcut is present.
+
+The 196-value public Python fixture and ignored 4,096-value local fixture matched the straightforward CPU baseline, retained optimized serial implementation, OpenMP, and CUDA bit for bit. The historical `(64, 35, 8, 8)` subset and all 47,228,125 canonical outputs also matched optimized serial exactly. A separate CUDA outcome byte per output reproduced all ten CPU diagnostic counters exactly; diagnostic collection was excluded from timing. Input remained unchanged. Phase A CPU/CUDA and Phase B CPU-only validation also passed.
+
+Kernel timing uses benchmark-local persistent buffers/events only to prevent allocation and sparse-launch cadence from contaminating the GPU-compute baseline: five warm-up pairs preceded seven individually event-timed launches. The adaptive-filter raw times were 19.757919, 19.807072, 19.804031, 19.746656, 19.768320, 19.658752, and 19.673857 ms, giving a 19.757919 ms median, 19.658752–19.807072 ms range, 0.274% CV, and 2,390.339 Moutput/s. The corresponding plane-minimum median was 1.808224 ms. Against the established 3318.3376 ms serial and 426.5593 ms OpenMP-16 medians, adaptive-kernel-only speedups were `167.950×` and `21.589×`; these intentionally exclude the separate plane-minimum stage and transfers.
+
+The same session also measured seven true one-shot calls with fresh internal device resources after five warm-ups. CUDA-event H2D/plane-minimum/adaptive/D2H medians were 102.079391/1.745600/30.969856/109.048515 ms, while per-run H2D-through-D2H totals were 319.693756, 238.147354, 280.826447, 208.080353, 304.672058, 237.531006, and 264.060638 ms (264.060638 ms median, 208.080353–319.693756 ms, 13.940% CV). That total is `12.567×` faster than established serial and `1.615×` faster than OpenMP-16. An optional native wall interval, which additionally includes validation, host/device allocations, event lifecycle, and cleanup, had a 751.1741 ms median and is not the GPU-path headline.
+
+One-shot pageable copies and sparse launches were visibly variable, and a later read-only device-state check found substantial background desktop GPU activity. The stable back-to-back kernel sequence is therefore the defensible kernel baseline; transfer-inclusive values remain a truthful result for this session rather than a universal estimate. This unoptimized baseline is retained regardless of performance. The next single experiment is focused Nsight Compute profiling of both kernels before proposing any GPU optimization.
+
 ## Data
 
 Four data roles are deliberately separate:
@@ -643,8 +655,9 @@ Completed reference and organization work:
 - retained Phase B specialized `3 × 3` selection with exhaustive 362,880-permutation verification, exact adaptive equivalence, a measured `1.311006×` speedup, and a reprofile selecting direct-row gathering next.
 - retained Phase B direct padded-row gathering with exact fixture/workload/counter equivalence, a repeatable 6–8% runtime reduction, and a reprofile selecting portable CPU parallelism next.
 - portable Phase B OpenMP detector-plane decomposition with exact public/local/subset/canonical equivalence and a best measured `7.779×` speedup at 16 threads.
+- correctness-first Phase B CUDA with separate global-minimum/adaptive kernels, exact public/local/subset/canonical and diagnostic equivalence, and a 19.757919 ms steady adaptive-kernel median.
 
-Phase A status: **complete**. Phase B portable OpenMP scaling status: **complete**. Next: implement a correctness-first adaptive CUDA baseline without changing the established numerical contract.
+Phase A status: **complete**. Phase B correctness-first adaptive CUDA status: **complete**. Next: profile the retained adaptive CUDA kernels with Nsight Compute before considering optimization.
 
 ## Remaining TBDs
 

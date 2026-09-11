@@ -189,6 +189,21 @@ if(PHASE_A_ENABLE_CUDA)
         CUDA_ARCHITECTURES "${PHASE_A_CUDA_ARCHITECTURES}"
     )
 
+    add_library(phase_b_adaptive_cuda_baseline STATIC
+        src/adaptive_median_cuda.cu
+    )
+    target_include_directories(phase_b_adaptive_cuda_baseline
+        PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    target_link_libraries(phase_b_adaptive_cuda_baseline PUBLIC CUDA::cudart)
+    set_target_properties(phase_b_adaptive_cuda_baseline PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED YES
+        CUDA_EXTENSIONS NO
+        CUDA_ARCHITECTURES "${PHASE_A_CUDA_ARCHITECTURES}"
+    )
+
     add_executable(phase_a_cuda_validation
         src/cuda_validation.cpp
         src/fixed_median.cpp
@@ -203,6 +218,16 @@ if(PHASE_A_ENABLE_CUDA)
     )
     add_executable(phase_a_cuda_transfer_characterization
         src/cuda_transfer_characterization.cpp
+        src/fixed_median.cpp
+    )
+    add_executable(phase_b_adaptive_cuda_validation
+        src/adaptive_cuda_validation.cpp
+        src/adaptive_median.cpp
+        src/fixed_median.cpp
+    )
+    add_executable(phase_b_adaptive_cuda_benchmark
+        src/adaptive_cuda_benchmark.cpp
+        src/adaptive_median.cpp
         src/fixed_median.cpp
     )
 
@@ -228,6 +253,26 @@ if(PHASE_A_ENABLE_CUDA)
         )
     endforeach()
 
+    foreach(adaptive_cuda_target IN ITEMS
+            phase_b_adaptive_cuda_validation
+            phase_b_adaptive_cuda_benchmark)
+        target_include_directories(${adaptive_cuda_target}
+            PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libnpy/include"
+        )
+        target_link_libraries(${adaptive_cuda_target}
+            PRIVATE
+                phase_b_adaptive_cuda_baseline
+                OpenMP::OpenMP_CXX
+        )
+        set_target_properties(${adaptive_cuda_target} PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED YES
+            CXX_EXTENSIONS NO
+        )
+    endforeach()
+
     target_compile_definitions(phase_a_cuda_validation
         PRIVATE
             PHASE_A_REFERENCE_INPUT_PATH="${PHASE_A_REFERENCE_INPUT_PATH}"
@@ -244,6 +289,15 @@ if(PHASE_A_ENABLE_CUDA)
     target_compile_definitions(phase_a_cuda_transfer_characterization
         PRIVATE
             PHASE_A_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
+    )
+    target_compile_definitions(phase_b_adaptive_cuda_validation
+        PRIVATE
+            PHASE_B_REFERENCE_INPUT_PATH="${PHASE_B_REFERENCE_INPUT_PATH}"
+            PHASE_B_REFERENCE_OUTPUT_PATH="${PHASE_B_REFERENCE_OUTPUT_PATH}"
+    )
+    target_compile_definitions(phase_b_adaptive_cuda_benchmark
+        PRIVATE
+            PHASE_B_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
     )
 endif()
 

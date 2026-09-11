@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, three retained serial optimizations, and a portable OpenMP implementation.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, three retained serial optimizations, portable OpenMP, and a correctness-first CUDA baseline.
 
-The next technical milestone is a correctness-first Phase B adaptive CUDA baseline. Projects 2–4 remain planned work.
+The next technical milestone is focused Nsight Compute profiling of the retained Phase B adaptive CUDA kernels. Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -27,7 +27,8 @@ The next technical milestone is a correctness-first Phase B adaptive CUDA baseli
 | Phase B specialized 3×3 selection | Complete | Exhaustively verified 19-comparator network produced a measured `1.311×` speedup |
 | Phase B direct-row gathering | Complete | Three padded-row bases reduced common-path gather/index work by a repeatable 6–8% |
 | Phase B portable OpenMP scaling | Complete | Detector-plane decomposition reached `7.779×` at 16 threads on the canonical workload |
-| Phase B adaptive CUDA baseline | **Next** | Implement the established adaptive contract without premature GPU optimization |
+| Phase B adaptive CUDA baseline | Complete | Two-stage baseline matches all 47,228,125 canonical outputs and CPU diagnostic counters bit for bit |
+| Phase B adaptive CUDA profiling | **Next** | Profile the plane-minimum and adaptive kernels before selecting any GPU optimization |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -66,7 +67,8 @@ Python reference
   → Phase B specialized nine-value selection [complete]
   → Phase B direct-row gathering [complete]
   → Phase B portable OpenMP scaling [complete]
-  → Phase B correctness-first adaptive CUDA [next]
+  → Phase B correctness-first adaptive CUDA [complete]
+  → Phase B adaptive CUDA profiling [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -80,6 +82,8 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
                                  correctness-first Phase B native API
         include/adaptive_median_detail.hpp
                                  tested selector primitive and internal experiment hooks
+        include/adaptive_median_cuda.hpp
+                                 Phase B CUDA API and timing result types
         include/fixed_median_cuda.hpp
                                  CUDA interface, RAII owner, and timing result types
         src/fixed_median_cuda.cu baseline kernel, one-shot path, and resident buffers
@@ -95,6 +99,10 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
                                  native timing and diagnostic-counter harness
         src/adaptive_validation.cpp
                                  public exact Phase B validation executable
+        src/adaptive_median_cuda.cu
+                                 two-stage correctness-first adaptive CUDA baseline
+        src/adaptive_cuda_validation.cpp / adaptive_cuda_benchmark.cpp
+                                 exact adaptive CUDA validation and timing harnesses
     reference_data/public_adaptive/
                                  public deterministic adaptive branch fixture
     reference_data/public_synthetic/
@@ -131,7 +139,7 @@ cmake --build 01_4DSTEM_Median_Filter_Acceleration/cpp/build
 
 The default executable validates the retained straightforward, median-of-nine, optimized-serial, and OpenMP implementations against a small deterministic synthetic fixture. Linux compilation and scaling are intended portability targets but have not yet been verified on the planned Lambda environment.
 
-The CUDA validation, comparison, stabilized-kernel, and transfer-characterization targets are enabled with `PHASE_A_ENABLE_CUDA=ON`; platform-specific CUDA configuration and reproduction commands are kept in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
+The Phase A and Phase B CUDA validation/benchmark targets are enabled with `PHASE_A_ENABLE_CUDA=ON`; platform-specific CUDA configuration and reproduction commands are kept in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
 
 ## Benchmark with a local input
 
