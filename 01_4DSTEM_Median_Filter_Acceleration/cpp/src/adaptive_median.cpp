@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include <omp.h>
+
 namespace phase_b {
 namespace detail {
 
@@ -332,6 +334,241 @@ std::vector<double> adaptive_median_impl(
     return output;
 }
 
+void merge_statistics(
+    AdaptiveMedianStatistics& destination,
+    const AdaptiveMedianStatistics& source)
+{
+    destination.total_outputs += source.total_outputs;
+    destination.finished_at_3x3 += source.finished_at_3x3;
+    destination.expanded_to_5x5 += source.expanded_to_5x5;
+    destination.finished_at_5x5 += source.finished_at_5x5;
+    destination.expanded_to_7x7 += source.expanded_to_7x7;
+    destination.finished_at_7x7 += source.finished_at_7x7;
+    destination.maximum_window_fallback += source.maximum_window_fallback;
+    destination.stage_b_retained_center += source.stage_b_retained_center;
+    destination.stage_b_replaced_with_median += source.stage_b_replaced_with_median;
+    destination.median_computations += source.median_computations;
+}
+
+template <bool collect_statistics>
+void adaptive_median_direct_detector_plane(
+    const std::vector<double>& input,
+    std::vector<double>& output,
+    const phase_a::Dimensions4D& dimensions,
+    std::size_t padded_scan_x,
+    std::size_t padded_element_count,
+    std::size_t detector_y,
+    std::size_t detector_x,
+    AdaptiveMedianStatistics& statistics)
+{
+    double plane_minimum = input[phase_a::flat_index(
+        dimensions, 0, 0, detector_y, detector_x)];
+    for (std::size_t scan_y = 0; scan_y < dimensions.scan_y; ++scan_y) {
+        for (std::size_t scan_x = 0; scan_x < dimensions.scan_x; ++scan_x) {
+            plane_minimum = std::min(
+                plane_minimum,
+                input[phase_a::flat_index(
+                    dimensions, scan_y, scan_x, detector_y, detector_x)]);
+        }
+    }
+
+    std::vector<double> padded_plane(padded_element_count, plane_minimum);
+    for (std::size_t scan_y = 0; scan_y < dimensions.scan_y; ++scan_y) {
+        for (std::size_t scan_x = 0; scan_x < dimensions.scan_x; ++scan_x) {
+            padded_plane[padded_index(
+                scan_y + padding,
+                scan_x + padding,
+                padded_scan_x)] = input[phase_a::flat_index(
+                    dimensions, scan_y, scan_x, detector_y, detector_x)];
+        }
+    }
+
+    for (std::size_t scan_y = 0; scan_y < dimensions.scan_y; ++scan_y) {
+        for (std::size_t scan_x = 0; scan_x < dimensions.scan_x; ++scan_x) {
+            if constexpr (collect_statistics) {
+                ++statistics.total_outputs;
+            }
+            const std::size_t center_y = scan_y + padding;
+            const std::size_t center_x = scan_x + padding;
+            const double center = padded_plane[padded_index(
+                center_y, center_x, padded_scan_x)];
+            double result = center;
+
+            for (const std::size_t window_size : window_sizes) {
+                if constexpr (collect_statistics) {
+                    ++statistics.median_computations;
+                }
+                SpecializedStackWindowStorage window(window_size * window_size);
+                double local_minimum = std::numeric_limits<double>::infinity();
+                double local_maximum = -std::numeric_limits<double>::infinity();
+
+                if (window_size == 3) {
+                    const std::size_t first_column = center_x - 1;
+                    const double* const top_row = padded_plane.data() +
+                        (center_y - 1) * padded_scan_x + first_column;
+                    const double* const middle_row = top_row + padded_scan_x;
+                    const double* const bottom_row = middle_row + padded_scan_x;
+                    const auto gather = [&](double value) {
+                        window.push_back(value);
+                        local_minimum = std::min(local_minimum, value);
+                        local_maximum = std::max(local_maximum, value);
+                    };
+
+                    gather(top_row[0]);
+                    gather(top_row[1]);
+                    gather(top_row[2]);
+                    gather(middle_row[0]);
+                    gather(middle_row[1]);
+                    gather(middle_row[2]);
+                    gather(bottom_row[0]);
+                    gather(bottom_row[1]);
+                    gather(bottom_row[2]);
+                }
+                else {
+                    const std::size_t radius = window_size / 2;
+                    for (std::size_t window_y = center_y - radius;
+                         window_y <= center_y + radius;
+                         ++window_y) {
+                        for (std::size_t window_x = center_x - radius;
+                             window_x <= center_x + radius;
+                             ++window_x) {
+                            const double value = padded_plane[padded_index(
+                                window_y, window_x, padded_scan_x)];
+                            window.push_back(value);
+                            local_minimum = std::min(local_minimum, value);
+                            local_maximum = std::max(local_maximum, value);
+                        }
+                    }
+                }
+
+                const double local_median = window.median();
+                if (local_minimum < local_median && local_median < local_maximum) {
+                    if constexpr (collect_statistics) {
+                        if (window_size == 3) {
+                            ++statistics.finished_at_3x3;
+                        }
+                        else if (window_size == 5) {
+                            ++statistics.finished_at_5x5;
+                        }
+                        else {
+                            ++statistics.finished_at_7x7;
+                        }
+                    }
+                    const bool retain_center =
+                        local_minimum < center && center < local_maximum;
+                    result = retain_center ? center : local_median;
+                    if constexpr (collect_statistics) {
+                        if (retain_center) {
+                            ++statistics.stage_b_retained_center;
+                        }
+                        else {
+                            ++statistics.stage_b_replaced_with_median;
+                        }
+                    }
+                    break;
+                }
+
+                if constexpr (collect_statistics) {
+                    if (window_size == 3) {
+                        ++statistics.expanded_to_5x5;
+                    }
+                    else if (window_size == 5) {
+                        ++statistics.expanded_to_7x7;
+                    }
+                }
+                if (window_size == window_sizes.back()) {
+                    result = center;
+                    if constexpr (collect_statistics) {
+                        ++statistics.maximum_window_fallback;
+                    }
+                }
+            }
+
+            output[phase_a::flat_index(
+                dimensions, scan_y, scan_x, detector_y, detector_x)] = result;
+        }
+    }
+}
+
+template <bool collect_statistics>
+std::vector<double> adaptive_median_openmp_impl(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    int thread_count,
+    AdaptiveMedianStatistics& statistics)
+{
+    const std::size_t element_count = checked_element_count(dimensions);
+    if (input.size() != element_count) {
+        throw std::invalid_argument("Input element count does not match the supplied 4D dimensions.");
+    }
+    if (thread_count < 1) {
+        throw std::invalid_argument("OpenMP thread count must be positive.");
+    }
+    if (!std::all_of(input.begin(), input.end(), [](double value) { return std::isfinite(value); })) {
+        throw std::invalid_argument("Adaptive median requires finite float64 values.");
+    }
+    if (dimensions.scan_y > std::numeric_limits<std::size_t>::max() - 2 * padding ||
+        dimensions.scan_x > std::numeric_limits<std::size_t>::max() - 2 * padding) {
+        throw std::overflow_error("Padded scan dimensions exceed std::size_t.");
+    }
+
+    const std::size_t padded_scan_y = dimensions.scan_y + 2 * padding;
+    const std::size_t padded_scan_x = dimensions.scan_x + 2 * padding;
+    const std::size_t padded_element_count = checked_multiply(
+        padded_scan_y,
+        padded_scan_x,
+        "The padded scan-plane size exceeds std::size_t.");
+    const std::size_t detector_plane_count = checked_multiply(
+        dimensions.detector_y,
+        dimensions.detector_x,
+        "The detector-plane count exceeds std::size_t.");
+    if (detector_plane_count > static_cast<std::size_t>(
+            std::numeric_limits<std::ptrdiff_t>::max())) {
+        throw std::overflow_error("The detector-plane count exceeds OpenMP loop range.");
+    }
+
+    std::vector<double> output(element_count);
+    std::vector<AdaptiveMedianStatistics> thread_statistics;
+    if constexpr (collect_statistics) {
+        thread_statistics.resize(static_cast<std::size_t>(thread_count));
+    }
+
+    // Static contiguous plane chunks provide coarse work, disjoint output,
+    // and no nested parallelism. Each thread owns its padded plane and counters.
+#pragma omp parallel num_threads(thread_count)
+    {
+        AdaptiveMedianStatistics local_statistics;
+#pragma omp for schedule(static)
+        for (std::ptrdiff_t plane_signed = 0;
+             plane_signed < static_cast<std::ptrdiff_t>(detector_plane_count);
+             ++plane_signed) {
+            const std::size_t plane = static_cast<std::size_t>(plane_signed);
+            const std::size_t detector_y = plane / dimensions.detector_x;
+            const std::size_t detector_x = plane % dimensions.detector_x;
+            adaptive_median_direct_detector_plane<collect_statistics>(
+                input,
+                output,
+                dimensions,
+                padded_scan_x,
+                padded_element_count,
+                detector_y,
+                detector_x,
+                local_statistics);
+        }
+        if constexpr (collect_statistics) {
+            thread_statistics[static_cast<std::size_t>(omp_get_thread_num())] = local_statistics;
+        }
+    }
+
+    if constexpr (collect_statistics) {
+        // Merge in thread-index order after all hot-path work has completed.
+        for (const AdaptiveMedianStatistics& local_statistics : thread_statistics) {
+            merge_statistics(statistics, local_statistics);
+        }
+    }
+    return output;
+}
+
 } // namespace
 
 std::vector<double> adaptive_median_s3_smax7(
@@ -388,6 +625,27 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_specialized_3x3_diagnost
     AdaptiveMedianDiagnosticResult result;
     result.output = adaptive_median_impl<true, SpecializedStackWindowStorage>(
         input, dimensions, result.statistics);
+    return result;
+}
+
+std::vector<double> adaptive_median_s3_smax7_openmp(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    int thread_count)
+{
+    AdaptiveMedianStatistics unused_statistics;
+    return adaptive_median_openmp_impl<false>(
+        input, dimensions, thread_count, unused_statistics);
+}
+
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_openmp_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    int thread_count)
+{
+    AdaptiveMedianDiagnosticResult result;
+    result.output = adaptive_median_openmp_impl<true>(
+        input, dimensions, thread_count, result.statistics);
     return result;
 }
 

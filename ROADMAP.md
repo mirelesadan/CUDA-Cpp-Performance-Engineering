@@ -142,6 +142,8 @@ The second isolated serial experiment was completed on 2026-09-10. The Phase A 1
 
 The third isolated serial experiment was completed on 2026-09-11. The retained specialized path remains callable, while an internal candidate replaces only the common `3 × 3` nested index loops with three padded-row bases and nine ordered loads; larger-window gathering and every numerical decision remain unchanged. Public, local, and 143,360-output comparisons were bitwise exact, all counters matched, input remained unchanged, and Phase A validation passed. The primary controlled sequence measured 9.1518/8.5972 ms baseline/candidate medians: `1.064509×`, a 6.0600% reduction, and 16.6752 Moutput/s. Two repeated sequences measured 8.2231% and 6.6462% reductions. Of 6,600 attributed candidate samples, selection was 60.17%, gathering/min-max 9.64%, plane/index work 18.82%, control/output 6.73%, and validation/output allocation 4.65%. The targeted gather share fell, while unchanged plane/index work became proportionally larger; the next experiment is portable OpenMP scaling over independent adaptive work rather than another small scalar micro-optimization.
 
+Portable adaptive OpenMP scaling was completed on 2026-09-11. A separate explicit-thread-count API statically partitions the 15,875 independent detector-coordinate planes and merges thread-local diagnostics after the parallel region. Public, local, representative-subset, and all 47,228,125 canonical outputs matched the optimized serial path bit for bit; every diagnostic counter matched and Phase A remained exact. On the canonical workload, serial/OpenMP-1 medians were 3318.3376/3264.2994 ms, so no measurable one-thread penalty was established. Speedups at 2/4/8/16/20 threads were `1.934×/3.524×/5.616×/7.779×/7.379×`; 16 threads was best at 426.5593 ms and 110.7188 Moutput/s. Static plane counts differed by at most one, and only 0.1472% of outputs expanded beyond `3 × 3`, so adaptive load imbalance is unlikely to explain the late flattening. Cache, memory-system, and hybrid-core effects are plausible but unprofiled. CPU scaling is sufficient to move next to a correctness-first adaptive CUDA baseline.
+
 ### Intended contribution
 
 Demonstrate a credible progression from a controlled fixed-window exercise to a measured adaptive bottleneck, then through modern C++, CPU optimization, CUDA, GPU profiling, validation, Python integration, and clear performance reporting.
@@ -279,7 +281,7 @@ All projects currently live in this public parent portfolio, and future work sho
 - [x] Remove per-window heap allocation with exact fixed-stack storage
 - [x] Specialize and exhaustively verify nine-value selection for the common path
 - [x] Replace common-path generic gathering with direct padded-row loads
-- [ ] Measure portable OpenMP scaling of the retained optimized adaptive path
+- [x] Measure portable OpenMP scaling of the retained optimized adaptive path
 - [x] Optimize and re-measure the serial CPU implementation
 - [ ] Implement initial CUDA
 - [ ] Validate and profile CUDA

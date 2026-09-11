@@ -538,6 +538,26 @@ The candidate produced a `1.064509×` speedup and 6.0600% median runtime reducti
 
 The targeted gathering share fell by 4.57 percentage points; unchanged plane preparation and generic indexing became a larger relative share, so percentage totals should not be read as exact component-time accounting. Selection remains dominant but is already a fixed network on the common path. The next experiment is portable OpenMP scaling over independent adaptive work rather than another small scalar micro-optimization.
 
+### Phase B portable OpenMP scaling — 2026-09-11
+
+The retained optimized serial path remains unchanged and callable. `adaptive_median_s3_smax7_openmp(...)` adds an explicit positive thread count and statically schedules the flattened `(detector_y, detector_x)` plane range. Each iteration owns one complete padded scan plane and writes one independent detector-coordinate output plane. The diagnostic path accumulates all ten counters per thread and merges them in thread-index order after the parallel region; no atomics or shared counter updates occur in the pixel path. CMake links the existing portable `OpenMP::OpenMP_CXX` target, with no Windows-specific threading code.
+
+The 196-value public fixture and ignored 4,096-value local fixture matched the optimized serial result and Python reference bit for bit at 1, 2, 4, 8, 16, and 20 threads. The historical 143,360-output subset and the full 47,228,125-output canonical workload also matched serial bit for bit at every count; diagnostic outputs and counters matched, input remained unchanged, zero and negative thread counts were rejected, and Phase A validation passed.
+
+The canonical workload was selected for scaling because the historical subset is too small for stable parallel conclusions. On AC power, the Release `/O2` benchmark disabled dynamic teams, warmed every configuration once, then recorded five filter-only wall-clock calls per configuration with internal output allocation and no file I/O.
+
+| Configuration | Raw times | Median | Throughput | Speedup | Efficiency |
+| --- | --- | ---: | ---: | ---: | ---: |
+| optimized serial | 3318.3376, 3320.4155, 3302.4510, 3332.9285, 3260.2945 ms | 3318.3376 ms | 14.2325 Moutput/s | `1.000×` | — |
+| OpenMP 1 | 3227.0973, 3342.8974, 3271.3952, 3264.2994, 3250.1974 ms | 3264.2994 ms | 14.4681 Moutput/s | `1.017×` | 101.7% |
+| OpenMP 2 | 1676.9486, 1731.8583, 1716.0141, 1705.5419, 1740.9183 ms | 1716.0141 ms | 27.5220 Moutput/s | `1.934×` | 96.7% |
+| OpenMP 4 | 955.1541, 932.1422, 934.3536, 944.6297, 941.5989 ms | 941.5989 ms | 50.1574 Moutput/s | `3.524×` | 88.1% |
+| OpenMP 8 | 612.7705, 604.4137, 590.8537, 578.7943, 588.0546 ms | 590.8537 ms | 79.9320 Moutput/s | `5.616×` | 70.2% |
+| OpenMP 16 | 426.5120, 419.9604, 426.5593, 446.4439, 435.5400 ms | 426.5593 ms | 110.7188 Moutput/s | `7.779×` | 48.6% |
+| OpenMP 20 | 450.1220, 468.2333, 428.2539, 413.9876, 449.6720 ms | 449.6720 ms | 105.0279 Moutput/s | `7.379×` | 36.9% |
+
+OpenMP-1 differed from serial by only 1.66%, within the observed variability, so no meaningful framework penalty is established. Scaling is near-linear through two threads, remains strong at four, and shows diminishing returns from eight onward. Sixteen threads was best; 20 threads was 5.42% slower, so the final logical-thread region provided no benefit in this run. Static scheduling assigns 992 or 993 detector planes per thread at 16 threads, while only 0.1472% of canonical outputs expand beyond `3 × 3` and extra median computations are 0.2877% of output count. Those measurements do not indicate meaningful adaptive-work imbalance. Cache, memory-system, and hybrid-core effects are plausible explanations for flattening but were not profiled. The OpenMP path is retained, and the next experiment is a correctness-first adaptive CUDA baseline.
+
 ## Data
 
 Four data roles are deliberately separate:
@@ -622,8 +642,9 @@ Completed reference and organization work:
 - retained Phase B fixed-stack window storage with exact fixture/workload and branch-counter equivalence, a measured `1.408914×` speedup, and a reprofile showing median selection at 69.27%.
 - retained Phase B specialized `3 × 3` selection with exhaustive 362,880-permutation verification, exact adaptive equivalence, a measured `1.311006×` speedup, and a reprofile selecting direct-row gathering next.
 - retained Phase B direct padded-row gathering with exact fixture/workload/counter equivalence, a repeatable 6–8% runtime reduction, and a reprofile selecting portable CPU parallelism next.
+- portable Phase B OpenMP detector-plane decomposition with exact public/local/subset/canonical equivalence and a best measured `7.779×` speedup at 16 threads.
 
-Phase A status: **complete**. Phase B direct padded-row gathering status: **complete**. Next: measure portable OpenMP scaling of the retained optimized adaptive path without changing numerical semantics.
+Phase A status: **complete**. Phase B portable OpenMP scaling status: **complete**. Next: implement a correctness-first adaptive CUDA baseline without changing the established numerical contract.
 
 ## Remaining TBDs
 

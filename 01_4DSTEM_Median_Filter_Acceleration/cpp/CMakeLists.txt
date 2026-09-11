@@ -52,6 +52,8 @@ target_include_directories(phase_b_adaptive_median_benchmark
 
 target_link_libraries(phase_a_fixed_median PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(phase_a_baseline_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(phase_b_adaptive_median_validation PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(phase_b_adaptive_median_benchmark PRIVATE OpenMP::OpenMP_CXX)
 
 # Embed the source-tree fixture paths so the executable does not depend on the
 # directory from which it is launched. Different paths can still be supplied

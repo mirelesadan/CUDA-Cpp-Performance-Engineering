@@ -57,4 +57,16 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_specialized_3x3_diagnost
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions);
 
+// Portable OpenMP implementation of the retained optimized serial path.
+// Independent detector-coordinate planes are assigned with static scheduling.
+std::vector<double> adaptive_median_s3_smax7_openmp(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    int thread_count);
+
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_openmp_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    int thread_count);
+
 } // namespace phase_b

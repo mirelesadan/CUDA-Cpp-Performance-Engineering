@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include <omp.h>
+
 #include "adaptive_median.hpp"
 #include "adaptive_median_detail.hpp"
 #include "npy.hpp"
@@ -29,6 +31,7 @@ namespace {
 constexpr std::size_t expected_dimension_count = 4;
 constexpr const char* expected_dtype = "<f8";
 constexpr std::size_t default_timed_runs = 7;
+constexpr std::size_t scaling_timed_runs = 5;
 
 struct LoadedNpy {
     npy::npy_data<double> array;
@@ -168,6 +171,14 @@ struct TimingSummary {
     double coefficient_of_variation;
 };
 
+struct ParallelResult {
+    int requested_threads;
+    int actual_threads;
+    std::size_t bitwise_mismatches;
+    std::vector<double> timings_ms;
+    TimingSummary summary{};
+};
+
 TimingSummary summarize_timings(const std::vector<double>& timings_ms)
 {
     std::vector<double> sorted = timings_ms;
@@ -186,6 +197,28 @@ TimingSummary summarize_timings(const std::vector<double>& timings_ms)
         mean_ms,
         100.0 * std::sqrt(squared_deviation_sum / timings_ms.size()) / mean_ms,
     };
+}
+
+int actual_openmp_team_size(int requested_threads)
+{
+    int actual_threads = 0;
+#pragma omp parallel num_threads(requested_threads)
+    {
+#pragma omp single
+        actual_threads = omp_get_num_threads();
+    }
+    return actual_threads;
+}
+
+std::vector<int> scaling_thread_counts(int available_threads)
+{
+    std::vector<int> counts;
+    for (const int count : {1, 2, 4, 8, 16, 20}) {
+        if (count <= available_threads) {
+            counts.push_back(count);
+        }
+    }
+    return counts;
 }
 
 std::size_t count_bitwise_mismatches(
@@ -260,6 +293,7 @@ int main(int argc, char* argv[])
 {
     try {
         std::filesystem::path input_path = PHASE_B_BENCHMARK_INPUT_PATH;
+        bool full_scaling_workload = false;
         enum class ProfileImplementation { none, heap, stack, specialized, direct_gather };
         ProfileImplementation profile_implementation = ProfileImplementation::none;
         std::size_t profile_runs = 0;
@@ -286,9 +320,13 @@ int main(int argc, char* argv[])
                     profile_implementation = ProfileImplementation::direct_gather;
                 }
             }
+            else if (value == "--full-scaling") {
+                full_scaling_workload = true;
+            }
             else if (input_path != std::filesystem::path(PHASE_B_BENCHMARK_INPUT_PATH)) {
                 throw std::runtime_error(
                     "Usage: phase_b_adaptive_median_benchmark.exe [input.npy] "
+                    "[--full-scaling] "
                     "[--profile-runs N | --profile-stack-runs N | "
                     "--profile-specialized-runs N | --profile-direct-gather-runs N]");
             }
@@ -298,12 +336,21 @@ int main(int argc, char* argv[])
         }
         input_path = std::filesystem::absolute(input_path).lexically_normal();
 
-        const LoadedNpy loaded = load_npy(input_path);
+        LoadedNpy loaded = load_npy(input_path);
         const phase_a::Dimensions4D source_dimensions = dimensions_from_shape(loaded.array.shape);
         phase_a::Dimensions4D dimensions{};
         std::array<Slice, 4> slices{};
-        const std::vector<double> input = extract_historical_profile_subset(
-            loaded.array.data, source_dimensions, dimensions, slices);
+        std::vector<double> input;
+        if (full_scaling_workload) {
+            dimensions = source_dimensions;
+            slices = {{{0, dimensions.scan_y}, {0, dimensions.scan_x},
+                       {0, dimensions.detector_y}, {0, dimensions.detector_x}}};
+            input = std::move(loaded.array.data);
+        }
+        else {
+            input = extract_historical_profile_subset(
+                loaded.array.data, source_dimensions, dimensions, slices);
+        }
         const std::vector<double> original_input = input;
 
         if (profile_implementation != ProfileImplementation::none) {
@@ -337,6 +384,146 @@ int main(int argc, char* argv[])
                       << "Profile filter calls: " << profile_runs << '\n'
                       << "Checksum: " << checksum << '\n';
             return 0;
+        }
+
+        if (full_scaling_workload) {
+            omp_set_dynamic(0);
+            const int openmp_max_threads = phase_a::openmp_max_threads();
+            const int openmp_processors = phase_a::openmp_processor_count();
+            const int available_threads = std::max(
+                1, std::min(openmp_max_threads, openmp_processors));
+            const std::vector<int> thread_counts = scaling_thread_counts(available_threads);
+            if (thread_counts.empty()) {
+                throw std::runtime_error("No requested OpenMP thread count is available.");
+            }
+
+            std::vector<double> serial_output =
+                phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather(
+                    input, dimensions);
+            std::vector<ParallelResult> parallel_results;
+            parallel_results.reserve(thread_counts.size());
+            bool correctness_passed = true;
+            for (const int requested_threads : thread_counts) {
+                const int actual_threads = actual_openmp_team_size(requested_threads);
+                if (actual_threads != requested_threads) {
+                    throw std::runtime_error(
+                        "OpenMP runtime supplied " + std::to_string(actual_threads) +
+                        " threads when " + std::to_string(requested_threads) +
+                        " were requested.");
+                }
+                const std::vector<double> openmp_output =
+                    phase_b::adaptive_median_s3_smax7_openmp(
+                        input, dimensions, requested_threads);
+                const std::size_t mismatches =
+                    count_bitwise_mismatches(serial_output, openmp_output);
+                correctness_passed = correctness_passed && mismatches == 0;
+                parallel_results.push_back(
+                    {requested_threads, actual_threads, mismatches, {}, {}});
+            }
+
+            phase_b::AdaptiveMedianDiagnosticResult serial_diagnostic =
+                phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather_diagnostics(
+                    input, dimensions);
+            phase_b::AdaptiveMedianDiagnosticResult openmp_diagnostic =
+                phase_b::adaptive_median_s3_smax7_openmp_diagnostics(
+                    input, dimensions, thread_counts.back());
+            const std::size_t serial_diagnostic_mismatches =
+                count_bitwise_mismatches(serial_output, serial_diagnostic.output);
+            const std::size_t openmp_diagnostic_mismatches =
+                count_bitwise_mismatches(serial_output, openmp_diagnostic.output);
+            const std::size_t statistic_mismatches = count_statistic_mismatches(
+                serial_diagnostic.statistics, openmp_diagnostic.statistics);
+            const phase_b::AdaptiveMedianStatistics statistics =
+                serial_diagnostic.statistics;
+            correctness_passed = correctness_passed &&
+                serial_diagnostic_mismatches == 0 &&
+                openmp_diagnostic_mismatches == 0 &&
+                statistic_mismatches == 0;
+            std::vector<double>().swap(serial_output);
+            std::vector<double>().swap(serial_diagnostic.output);
+            std::vector<double>().swap(openmp_diagnostic.output);
+
+            std::vector<double> serial_timings_ms;
+            serial_timings_ms.reserve(scaling_timed_runs);
+            for (ParallelResult& result : parallel_results) {
+                result.timings_ms.reserve(scaling_timed_runs);
+            }
+            const auto measure_filter = [](const auto& filter) {
+                const auto start = std::chrono::steady_clock::now();
+                const std::vector<double> output = filter();
+                const auto stop = std::chrono::steady_clock::now();
+                volatile double checksum = output[output.size() / 2];
+                static_cast<void>(checksum);
+                return std::chrono::duration<double, std::milli>(stop - start).count();
+            };
+
+            for (std::size_t run = 0; run < scaling_timed_runs; ++run) {
+                serial_timings_ms.push_back(measure_filter([&] {
+                    return phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather(
+                        input, dimensions);
+                }));
+                for (ParallelResult& result : parallel_results) {
+                    result.timings_ms.push_back(measure_filter([&] {
+                        return phase_b::adaptive_median_s3_smax7_openmp(
+                            input, dimensions, result.requested_threads);
+                    }));
+                }
+            }
+
+            const TimingSummary serial_summary = summarize_timings(serial_timings_ms);
+            for (ParallelResult& result : parallel_results) {
+                result.summary = summarize_timings(result.timings_ms);
+            }
+            const std::size_t input_changes = count_bitwise_mismatches(input, original_input);
+            correctness_passed = correctness_passed && input_changes == 0;
+
+            std::cout << std::fixed << std::setprecision(6)
+                      << "Project 1 Phase B portable OpenMP scaling benchmark\n"
+                      << "Input path: " << input_path.string() << '\n'
+                      << "Benchmark shape: (" << dimensions.scan_y << ", "
+                      << dimensions.scan_x << ", " << dimensions.detector_y << ", "
+                      << dimensions.detector_x << ")\n"
+                      << "Output elements: " << input.size() << '\n'
+                      << "Detector-coordinate planes: "
+                      << dimensions.detector_y * dimensions.detector_x << '\n'
+                      << "OpenMP processor count: " << openmp_processors << '\n'
+                      << "OpenMP maximum threads: " << openmp_max_threads << '\n'
+                      << "OpenMP dynamic teams: disabled\n"
+                      << "Warm-up filter calls per implementation: 1\n"
+                      << "Timed filter calls per implementation: "
+                      << scaling_timed_runs << '\n'
+                      << "Timed order: serial then ascending OpenMP counts per repetition\n";
+            print_timing_results(
+                "Optimized serial", serial_timings_ms, serial_summary, input.size());
+            for (const ParallelResult& result : parallel_results) {
+                const std::string label =
+                    "OpenMP " + std::to_string(result.actual_threads) + " thread";
+                print_timing_results(
+                    label.c_str(), result.timings_ms, result.summary, input.size());
+                const double speedup = serial_summary.median_ms / result.summary.median_ms;
+                std::cout << label << " speedup vs serial: " << speedup << "x\n"
+                          << label << " parallel efficiency (%): "
+                          << 100.0 * speedup / result.actual_threads << '\n'
+                          << label << " bitwise mismatches: "
+                          << result.bitwise_mismatches << '\n';
+            }
+            std::cout << "Serial diagnostic-vs-normal mismatches: "
+                      << serial_diagnostic_mismatches << '\n'
+                      << "OpenMP diagnostic-vs-serial mismatches: "
+                      << openmp_diagnostic_mismatches << '\n'
+                      << "Serial-vs-OpenMP statistic field mismatches: "
+                      << statistic_mismatches << '\n'
+                      << "Input bitwise changes: " << input_changes << '\n'
+                      << "Finished at 3x3: " << statistics.finished_at_3x3 << " ("
+                      << percentage(statistics.finished_at_3x3, statistics.total_outputs)
+                      << "%)\n"
+                      << "Expanded to 5x5: " << statistics.expanded_to_5x5 << " ("
+                      << percentage(statistics.expanded_to_5x5, statistics.total_outputs)
+                      << "%)\n"
+                      << "Median computations: " << statistics.median_computations << '\n'
+                      << "Validation result: "
+                      << (correctness_passed ? "PASS" : "FAIL") << '\n';
+            return correctness_passed ? 0 : 1;
         }
 
         std::vector<double> baseline_output =
@@ -386,6 +573,30 @@ int main(int argc, char* argv[])
         const phase_b::AdaptiveMedianDiagnosticResult candidate_diagnostic =
             phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather_diagnostics(
                 input, dimensions);
+        omp_set_dynamic(0);
+        const int validation_available_threads = std::max(
+            1,
+            std::min(phase_a::openmp_max_threads(), phase_a::openmp_processor_count()));
+        const std::vector<int> validation_thread_counts =
+            scaling_thread_counts(validation_available_threads);
+        std::vector<std::pair<int, std::size_t>> openmp_validation_mismatches;
+        for (const int threads : validation_thread_counts) {
+            const std::vector<double> openmp_output = phase_b::adaptive_median_s3_smax7_openmp(
+                input, dimensions, threads);
+            openmp_validation_mismatches.emplace_back(
+                threads, count_bitwise_mismatches(candidate_output, openmp_output));
+        }
+        const phase_b::AdaptiveMedianDiagnosticResult openmp_diagnostic =
+            phase_b::adaptive_median_s3_smax7_openmp_diagnostics(
+                input, dimensions, validation_thread_counts.back());
+        const std::size_t openmp_diagnostic_mismatches =
+            count_bitwise_mismatches(candidate_output, openmp_diagnostic.output);
+        const std::size_t openmp_statistic_mismatches = count_statistic_mismatches(
+            candidate_diagnostic.statistics, openmp_diagnostic.statistics);
+        const bool openmp_validation_passed = std::all_of(
+            openmp_validation_mismatches.begin(),
+            openmp_validation_mismatches.end(),
+            [](const std::pair<int, std::size_t>& result) { return result.second == 0; });
         const std::size_t baseline_candidate_mismatches =
             count_bitwise_mismatches(baseline_output, candidate_output);
         const std::size_t baseline_diagnostic_mismatches =
@@ -437,6 +648,14 @@ int main(int argc, char* argv[])
                   << "Candidate diagnostic-vs-timed bitwise mismatches: "
                   << candidate_diagnostic_mismatches << '\n'
                   << "Adaptive-statistic field mismatches: " << statistic_mismatches << '\n'
+                  << "OpenMP validation mismatches by thread count:";
+        for (const auto& result : openmp_validation_mismatches) {
+            std::cout << " " << result.first << ":" << result.second;
+        }
+        std::cout << '\n'
+                  << "OpenMP diagnostic/statistic mismatches: "
+                  << openmp_diagnostic_mismatches << "/"
+                  << openmp_statistic_mismatches << '\n'
                   << "Input bitwise changes: " << input_changes << '\n'
                   << "Finished at 3x3: " << statistics.finished_at_3x3 << " ("
                   << percentage(statistics.finished_at_3x3, statistics.total_outputs) << "%)\n"
@@ -464,6 +683,9 @@ int main(int argc, char* argv[])
                               baseline_diagnostic_mismatches == 0 &&
                               candidate_diagnostic_mismatches == 0 &&
                               statistic_mismatches == 0 &&
+                              openmp_validation_passed &&
+                              openmp_diagnostic_mismatches == 0 &&
+                              openmp_statistic_mismatches == 0 &&
                               input_changes == 0
                           ? "PASS"
                           : "FAIL")
@@ -472,7 +694,11 @@ int main(int argc, char* argv[])
         return baseline_candidate_mismatches == 0 &&
                 baseline_diagnostic_mismatches == 0 &&
                 candidate_diagnostic_mismatches == 0 &&
-                statistic_mismatches == 0 && input_changes == 0
+                statistic_mismatches == 0 &&
+                openmp_validation_passed &&
+                openmp_diagnostic_mismatches == 0 &&
+                openmp_statistic_mismatches == 0 &&
+                input_changes == 0
             ? 0
             : 1;
     }

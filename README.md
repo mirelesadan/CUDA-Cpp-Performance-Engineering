@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, a CPU profile, and three retained serial optimizations.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, three retained serial optimizations, and a portable OpenMP implementation.
 
-The next technical milestone is a portable Phase B OpenMP scaling experiment using the retained optimized scalar path. Projects 2–4 remain planned work.
+The next technical milestone is a correctness-first Phase B adaptive CUDA baseline. Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -26,7 +26,8 @@ The next technical milestone is a portable Phase B OpenMP scaling experiment usi
 | Phase B fixed-stack storage | Complete | Removed per-window heap allocation with exact semantics and a measured `1.409×` speedup |
 | Phase B specialized 3×3 selection | Complete | Exhaustively verified 19-comparator network produced a measured `1.311×` speedup |
 | Phase B direct-row gathering | Complete | Three padded-row bases reduced common-path gather/index work by a repeatable 6–8% |
-| Phase B portable OpenMP scaling | **Next** | Measure parallel decomposition without changing adaptive semantics |
+| Phase B portable OpenMP scaling | Complete | Detector-plane decomposition reached `7.779×` at 16 threads on the canonical workload |
+| Phase B adaptive CUDA baseline | **Next** | Implement the established adaptive contract without premature GPU optimization |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -64,7 +65,8 @@ Python reference
   → Phase B fixed-stack storage [complete]
   → Phase B specialized nine-value selection [complete]
   → Phase B direct-row gathering [complete]
-  → Phase B portable OpenMP scaling [next]
+  → Phase B portable OpenMP scaling [complete]
+  → Phase B correctness-first adaptive CUDA [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.

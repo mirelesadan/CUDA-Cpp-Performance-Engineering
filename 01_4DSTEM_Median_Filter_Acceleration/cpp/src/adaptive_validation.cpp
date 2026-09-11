@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <omp.h>
+
 #include "adaptive_median.hpp"
 #include "adaptive_median_detail.hpp"
 #include "npy.hpp"
@@ -206,6 +208,19 @@ int main(int argc, char* argv[])
 
         const std::vector<double> original_input = input.array.data;
         const phase_a::Dimensions4D dimensions = dimensions_from_shape(input.array.shape);
+        omp_set_dynamic(0);
+        const int available_threads = std::max(
+            1,
+            std::min(phase_a::openmp_max_threads(), phase_a::openmp_processor_count()));
+        std::vector<int> openmp_thread_counts;
+        for (const int count : {1, 2, 4, 8, 16, 20}) {
+            if (count <= available_threads) {
+                openmp_thread_counts.push_back(count);
+            }
+        }
+        if (openmp_thread_counts.empty() || openmp_thread_counts.back() != available_threads) {
+            openmp_thread_counts.push_back(available_threads);
+        }
         const auto baseline_start = std::chrono::steady_clock::now();
         const std::vector<double> baseline = phase_b::adaptive_median_s3_smax7(
             input.array.data,
@@ -241,6 +256,47 @@ int main(int argc, char* argv[])
             phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather_diagnostics(
                 input.array.data,
                 dimensions);
+
+        struct OpenMpValidation {
+            int threads;
+            std::size_t reference_mismatches;
+            std::size_t serial_mismatches;
+            std::size_t diagnostic_mismatches;
+            std::size_t statistic_mismatches;
+        };
+        std::vector<OpenMpValidation> openmp_validations;
+        for (const int threads : openmp_thread_counts) {
+            const std::vector<double> openmp_output = phase_b::adaptive_median_s3_smax7_openmp(
+                input.array.data, dimensions, threads);
+            const phase_b::AdaptiveMedianDiagnosticResult openmp_diagnostic =
+                phase_b::adaptive_median_s3_smax7_openmp_diagnostics(
+                    input.array.data, dimensions, threads);
+            openmp_validations.push_back({
+                threads,
+                count_bitwise_mismatches(openmp_output, reference.array.data),
+                count_bitwise_mismatches(openmp_output, direct_gather),
+                count_bitwise_mismatches(openmp_output, openmp_diagnostic.output),
+                count_statistic_mismatches(
+                    direct_gather_diagnostic.statistics, openmp_diagnostic.statistics),
+            });
+        }
+
+        bool rejected_zero_threads = false;
+        bool rejected_negative_threads = false;
+        try {
+            static_cast<void>(phase_b::adaptive_median_s3_smax7_openmp(
+                input.array.data, dimensions, 0));
+        }
+        catch (const std::invalid_argument&) {
+            rejected_zero_threads = true;
+        }
+        try {
+            static_cast<void>(phase_b::adaptive_median_s3_smax7_openmp(
+                input.array.data, dimensions, -1));
+        }
+        catch (const std::invalid_argument&) {
+            rejected_negative_threads = true;
+        }
 
         const std::size_t baseline_reference_mismatches =
             count_bitwise_mismatches(baseline, reference.array.data);
@@ -325,6 +381,18 @@ int main(int argc, char* argv[])
                   << direct_gather_diagnostic_mismatches << '\n'
                   << "Specialized-vs-direct-gather statistic field mismatches: "
                   << direct_gather_statistic_mismatches << '\n'
+                  << "OpenMP maximum threads: " << available_threads << '\n';
+        for (const OpenMpValidation& validation : openmp_validations) {
+            std::cout << "OpenMP-" << validation.threads
+                      << " reference/serial/diagnostic/statistic mismatches: "
+                      << validation.reference_mismatches << "/"
+                      << validation.serial_mismatches << "/"
+                      << validation.diagnostic_mismatches << "/"
+                      << validation.statistic_mismatches << '\n';
+        }
+        std::cout << "Rejected zero/negative OpenMP thread counts: "
+                  << (rejected_zero_threads ? "yes" : "no") << "/"
+                  << (rejected_negative_threads ? "yes" : "no") << '\n'
                   << "Input bitwise changes: " << input_mismatches << '\n'
                   << std::fixed << std::setprecision(6)
                   << "Heap filter time: "
@@ -356,6 +424,15 @@ int main(int argc, char* argv[])
                       << double_bits(reference.array.data[first_mismatch]) << std::dec << '\n';
         }
 
+        const bool openmp_passed = std::all_of(
+            openmp_validations.begin(),
+            openmp_validations.end(),
+            [](const OpenMpValidation& validation) {
+                return validation.reference_mismatches == 0 &&
+                    validation.serial_mismatches == 0 &&
+                    validation.diagnostic_mismatches == 0 &&
+                    validation.statistic_mismatches == 0;
+            });
         const bool passed =
             selector_verification.permutations == 362880 &&
             selector_verification.permutation_mismatches == 0 &&
@@ -374,6 +451,9 @@ int main(int argc, char* argv[])
             specialized_direct_gather_mismatches == 0 &&
             direct_gather_diagnostic_mismatches == 0 &&
             direct_gather_statistic_mismatches == 0 &&
+            openmp_passed &&
+            rejected_zero_threads &&
+            rejected_negative_threads &&
             input_mismatches == 0;
         std::cout << "Validation result: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;
