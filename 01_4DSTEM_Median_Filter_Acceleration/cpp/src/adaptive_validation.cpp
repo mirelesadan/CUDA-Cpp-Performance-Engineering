@@ -95,6 +95,37 @@ std::uint64_t double_bits(double value)
     return bits;
 }
 
+std::size_t count_bitwise_mismatches(
+    const std::vector<double>& left,
+    const std::vector<double>& right)
+{
+    if (left.size() != right.size()) {
+        throw std::runtime_error("Cannot compare arrays with different element counts.");
+    }
+    std::size_t mismatches = 0;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        mismatches += double_bits(left[index]) != double_bits(right[index]);
+    }
+    return mismatches;
+}
+
+std::size_t count_statistic_mismatches(
+    const phase_b::AdaptiveMedianStatistics& left,
+    const phase_b::AdaptiveMedianStatistics& right)
+{
+    return
+        (left.total_outputs != right.total_outputs) +
+        (left.finished_at_3x3 != right.finished_at_3x3) +
+        (left.expanded_to_5x5 != right.expanded_to_5x5) +
+        (left.finished_at_5x5 != right.finished_at_5x5) +
+        (left.expanded_to_7x7 != right.expanded_to_7x7) +
+        (left.finished_at_7x7 != right.finished_at_7x7) +
+        (left.maximum_window_fallback != right.maximum_window_fallback) +
+        (left.stage_b_retained_center != right.stage_b_retained_center) +
+        (left.stage_b_replaced_with_median != right.stage_b_replaced_with_median) +
+        (left.median_computations != right.median_computations);
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -122,22 +153,42 @@ int main(int argc, char* argv[])
         }
 
         const std::vector<double> original_input = input.array.data;
-        const auto start = std::chrono::steady_clock::now();
-        const std::vector<double> actual = phase_b::adaptive_median_s3_smax7(
+        const phase_a::Dimensions4D dimensions = dimensions_from_shape(input.array.shape);
+        const auto baseline_start = std::chrono::steady_clock::now();
+        const std::vector<double> baseline = phase_b::adaptive_median_s3_smax7(
             input.array.data,
-            dimensions_from_shape(input.array.shape));
-        const auto stop = std::chrono::steady_clock::now();
-        const double elapsed_ms =
-            std::chrono::duration<double, std::milli>(stop - start).count();
+            dimensions);
+        const auto baseline_stop = std::chrono::steady_clock::now();
+        const auto stack_start = std::chrono::steady_clock::now();
+        const std::vector<double> stack = phase_b::adaptive_median_s3_smax7_stack(
+            input.array.data,
+            dimensions);
+        const auto stack_stop = std::chrono::steady_clock::now();
 
-        std::size_t output_mismatches = 0;
-        std::size_t first_mismatch = actual.size();
-        for (std::size_t index = 0; index < actual.size(); ++index) {
-            if (double_bits(actual[index]) != double_bits(reference.array.data[index])) {
-                if (first_mismatch == actual.size()) {
+        const phase_b::AdaptiveMedianDiagnosticResult baseline_diagnostic =
+            phase_b::adaptive_median_s3_smax7_diagnostics(input.array.data, dimensions);
+        const phase_b::AdaptiveMedianDiagnosticResult stack_diagnostic =
+            phase_b::adaptive_median_s3_smax7_stack_diagnostics(input.array.data, dimensions);
+
+        const std::size_t baseline_reference_mismatches =
+            count_bitwise_mismatches(baseline, reference.array.data);
+        const std::size_t stack_reference_mismatches =
+            count_bitwise_mismatches(stack, reference.array.data);
+        const std::size_t baseline_stack_mismatches =
+            count_bitwise_mismatches(baseline, stack);
+        const std::size_t baseline_diagnostic_mismatches =
+            count_bitwise_mismatches(baseline, baseline_diagnostic.output);
+        const std::size_t stack_diagnostic_mismatches =
+            count_bitwise_mismatches(stack, stack_diagnostic.output);
+        const std::size_t statistic_mismatches = count_statistic_mismatches(
+            baseline_diagnostic.statistics, stack_diagnostic.statistics);
+
+        std::size_t first_mismatch = stack.size();
+        for (std::size_t index = 0; index < stack.size(); ++index) {
+            if (double_bits(stack[index]) != double_bits(reference.array.data[index])) {
+                if (first_mismatch == stack.size()) {
                     first_mismatch = index;
                 }
-                ++output_mismatches;
             }
         }
 
@@ -151,12 +202,27 @@ int main(int argc, char* argv[])
                   << "Shape: (" << input.array.shape[0] << ", " << input.array.shape[1]
                   << ", " << input.array.shape[2] << ", " << input.array.shape[3] << ")\n"
                   << "Elements compared: " << input.element_count << '\n'
-                  << "Bitwise mismatches: " << output_mismatches << '\n'
+                  << "Heap baseline-vs-reference mismatches: "
+                  << baseline_reference_mismatches << '\n'
+                  << "Stack candidate-vs-reference mismatches: "
+                  << stack_reference_mismatches << '\n'
+                  << "Heap baseline-vs-stack candidate mismatches: "
+                  << baseline_stack_mismatches << '\n'
+                  << "Heap diagnostic-vs-normal mismatches: "
+                  << baseline_diagnostic_mismatches << '\n'
+                  << "Stack diagnostic-vs-normal mismatches: "
+                  << stack_diagnostic_mismatches << '\n'
+                  << "Branch-statistic field mismatches: " << statistic_mismatches << '\n'
                   << "Input bitwise changes: " << input_mismatches << '\n'
                   << std::fixed << std::setprecision(6)
-                  << "Filter time: " << elapsed_ms << " ms\n";
+                  << "Heap filter time: "
+                  << std::chrono::duration<double, std::milli>(
+                         baseline_stop - baseline_start).count() << " ms\n"
+                  << "Stack filter time: "
+                  << std::chrono::duration<double, std::milli>(
+                         stack_stop - stack_start).count() << " ms\n";
 
-        if (first_mismatch != actual.size()) {
+        if (first_mismatch != stack.size()) {
             const std::size_t detector_x = first_mismatch % input.array.shape[3];
             std::size_t remaining = first_mismatch / input.array.shape[3];
             const std::size_t detector_y = remaining % input.array.shape[2];
@@ -166,12 +232,19 @@ int main(int argc, char* argv[])
             std::cout << "First mismatch: flat index " << first_mismatch
                       << " at (" << scan_y << ", " << scan_x << ", "
                       << detector_y << ", " << detector_x << ")"
-                      << ", actual bits 0x" << std::hex << double_bits(actual[first_mismatch])
+                      << ", stack bits 0x" << std::hex << double_bits(stack[first_mismatch])
                       << ", expected bits 0x"
                       << double_bits(reference.array.data[first_mismatch]) << std::dec << '\n';
         }
 
-        const bool passed = output_mismatches == 0 && input_mismatches == 0;
+        const bool passed =
+            baseline_reference_mismatches == 0 &&
+            stack_reference_mismatches == 0 &&
+            baseline_stack_mismatches == 0 &&
+            baseline_diagnostic_mismatches == 0 &&
+            stack_diagnostic_mismatches == 0 &&
+            statistic_mismatches == 0 &&
+            input_mismatches == 0;
         std::cout << "Validation result: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;
     }

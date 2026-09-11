@@ -134,7 +134,9 @@ The correctness-first native C++17 baseline was completed on 2026-09-10. It foll
 
 The native baseline benchmark/profile was completed on 2026-09-10 using the exact historical centered `(64, 35, 8, 8)` subset (143,360 outputs) derived from the ignored canonical input. One warm-up plus seven Release `/O2` filter-only runs produced a 15.3165 ms median, 15.2896–15.4852 ms range, 0.430% CV, and 9.3598 Moutput/s. Five matching public 4Denoise calls produced a 17.7459 s median. Separate counters found 99.8214% of outputs finished at `3 × 3`; only 0.1786% expanded, all to maximum-window fallback, for 143,872 median computations.
 
-Low-overhead main-thread sampling with optimized symbols attributed 10,482 of 10,517 samples to filter source: median selection 44.16%, per-window temporary-vector allocation/teardown 37.24%, gathering plus min/max 7.89%, plane preparation/indexing 5.65%, and remaining work 5.07%. Shares are directional because sampling perturbs wall time and optimized unwind data groups heap frames at their source call/scope-end sites. The ranked next candidates are fixed stack storage without changing selection, a specialized nine-value selector for the 99.82% common path, then direct-address `3 × 3` gathering. The first experiment will isolate removal of temporary window allocations.
+Low-overhead main-thread sampling with optimized symbols attributed 10,482 of 10,517 samples to filter source: median selection 44.16%, per-window temporary-vector allocation/teardown 37.24%, gathering plus min/max 7.89%, plane preparation/indexing 5.65%, and remaining work 5.07%. Shares are directional because sampling perturbs wall time and optimized unwind data groups heap frames at their source call/scope-end sites. The ranked next candidates were fixed stack storage without changing selection, a specialized nine-value selector for the 99.82% common path, then direct-address `3 × 3` gathering.
+
+The first isolated serial experiment was completed on 2026-09-10. Fixed 49-value stack storage removed per-window heap allocation while retaining the heap baseline, `std::nth_element`, gathering, padding, and every numerical decision. Public, local, and 143,360-output benchmark comparisons were bitwise exact, with identical branch and Stage B counters. In an AC-powered, alternating-order, logical-processor-0-controlled sequence, the fresh heap/stack medians were 15.6822/11.1307 ms: `1.408914×` speedup, 29.0234% runtime reduction, and 12.8797 Moutput/s. Reprofiling attributed 6,603 samples to filter source: median selection 69.27%, gathering/min-max 11.83%, plane/index work 11.02%, control/output 4.68%, and validation/output allocation 3.20%; per-window heap work disappeared as a measurable category. The next experiment will specialize nine-value selection for the 99.8214% common path while preserving general `25`/`49`-value selection.
 
 ### Intended contribution
 
@@ -270,6 +272,7 @@ All projects currently live in this public parent portfolio, and future work sho
 - [x] Implement straightforward C++
 - [x] Validate C++ output
 - [x] Benchmark and profile C++
+- [x] Remove per-window heap allocation with exact fixed-stack storage
 - [ ] Optimize and re-measure the CPU implementation
 - [ ] Implement initial CUDA
 - [ ] Validate and profile CUDA

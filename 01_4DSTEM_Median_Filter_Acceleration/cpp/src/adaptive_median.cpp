@@ -48,16 +48,57 @@ std::size_t padded_index(
     return row * padded_scan_x + column;
 }
 
-double median_of_window(std::vector<double>& values)
-{
-    const auto middle = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
-    std::nth_element(values.begin(), middle, values.end());
-    return *middle;
-}
+class HeapWindowStorage {
+public:
+    explicit HeapWindowStorage(std::size_t capacity)
+    {
+        values_.reserve(capacity);
+    }
 
-} // namespace
+    void push_back(double value)
+    {
+        values_.push_back(value);
+    }
 
-template <bool collect_statistics>
+    double median()
+    {
+        const auto middle = values_.begin() + static_cast<std::ptrdiff_t>(values_.size() / 2);
+        std::nth_element(values_.begin(), middle, values_.end());
+        return *middle;
+    }
+
+private:
+    std::vector<double> values_;
+};
+
+class StackWindowStorage {
+public:
+    explicit StackWindowStorage(std::size_t capacity)
+    {
+        if (capacity > values_.size()) {
+            throw std::logic_error("Adaptive window exceeds fixed stack capacity.");
+        }
+    }
+
+    void push_back(double value)
+    {
+        values_[size_++] = value;
+    }
+
+    double median()
+    {
+        const auto middle = values_.begin() + static_cast<std::ptrdiff_t>(size_ / 2);
+        const auto end = values_.begin() + static_cast<std::ptrdiff_t>(size_);
+        std::nth_element(values_.begin(), middle, end);
+        return *middle;
+    }
+
+private:
+    std::array<double, 49> values_;
+    std::size_t size_ = 0;
+};
+
+template <bool collect_statistics, typename WindowStorage>
 std::vector<double> adaptive_median_impl(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions,
@@ -127,8 +168,7 @@ std::vector<double> adaptive_median_impl(
                             ++statistics.median_computations;
                         }
                         const std::size_t radius = window_size / 2;
-                        std::vector<double> window;
-                        window.reserve(window_size * window_size);
+                        WindowStorage window(window_size * window_size);
                         double local_minimum = std::numeric_limits<double>::infinity();
                         double local_maximum = -std::numeric_limits<double>::infinity();
 
@@ -146,7 +186,7 @@ std::vector<double> adaptive_median_impl(
                             }
                         }
 
-                        const double local_median = median_of_window(window);
+                        const double local_median = window.median();
                         if (local_minimum < local_median && local_median < local_maximum) {
                             if constexpr (collect_statistics) {
                                 if (window_size == 3) {
@@ -202,12 +242,15 @@ std::vector<double> adaptive_median_impl(
     return output;
 }
 
+} // namespace
+
 std::vector<double> adaptive_median_s3_smax7(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions)
 {
     AdaptiveMedianStatistics unused_statistics;
-    return adaptive_median_impl<false>(input, dimensions, unused_statistics);
+    return adaptive_median_impl<false, HeapWindowStorage>(
+        input, dimensions, unused_statistics);
 }
 
 AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_diagnostics(
@@ -215,7 +258,27 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_diagnostics(
     const phase_a::Dimensions4D& dimensions)
 {
     AdaptiveMedianDiagnosticResult result;
-    result.output = adaptive_median_impl<true>(input, dimensions, result.statistics);
+    result.output = adaptive_median_impl<true, HeapWindowStorage>(
+        input, dimensions, result.statistics);
+    return result;
+}
+
+std::vector<double> adaptive_median_s3_smax7_stack(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    AdaptiveMedianStatistics unused_statistics;
+    return adaptive_median_impl<false, StackWindowStorage>(
+        input, dimensions, unused_statistics);
+}
+
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_stack_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    AdaptiveMedianDiagnosticResult result;
+    result.output = adaptive_median_impl<true, StackWindowStorage>(
+        input, dimensions, result.statistics);
     return result;
 }
 

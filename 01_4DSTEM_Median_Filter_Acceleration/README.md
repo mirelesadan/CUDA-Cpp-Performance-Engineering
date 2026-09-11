@@ -461,7 +461,34 @@ The unchanged baseline was then sampled on its main worker thread with the accep
 
 Optimized unwind/source records map runtime heap calls to `window.reserve(...)` and the implicit scope-end destruction point, so the allocation/teardown group is reliable in aggregate but not separable more precisely. Plane construction and border padding are minor; adaptive expansion is also rare. This differs from the earlier Python `cProfile`, where `np.median` represented 68.75% and median/min/max together 88.28% of profiled time. Native selection remains largest, but per-output heap traffic emerges as a nearly co-dominant cost that Python function-level profiling did not expose.
 
-The evidence ranks the next serial candidates as: (1) replace the 143,872 temporary window-vector allocations with fixed stack storage while retaining `std::nth_element` and gather order—low-to-medium complexity, low semantic risk, and the cleanest first experiment against the 37.24% heap group; (2) specialize the overwhelmingly common nine-value selection while retaining general 25/49-value paths—medium complexity and medium exactness risk, targeting the 44.16% selection group; (3) use direct padded-row addressing for the common `3 × 3` gather/min/max path—medium complexity and low-to-medium indexing risk, targeting the smaller 13.54% gather/preparation/index group. Padding-specific or general adaptive-branch optimization is not currently justified.
+The evidence ranked the next serial candidates as: (1) replace the 143,872 temporary window-vector allocations with fixed stack storage while retaining `std::nth_element` and gather order—low-to-medium complexity, low semantic risk, and the cleanest first experiment against the 37.24% heap group; (2) specialize the overwhelmingly common nine-value selection while retaining general 25/49-value paths—medium complexity and medium exactness risk, targeting the 44.16% selection group; (3) use direct padded-row addressing for the common `3 × 3` gather/min/max path—medium complexity and low-to-medium indexing risk, targeting the smaller 13.54% gather/preparation/index group. Padding-specific or general adaptive-branch optimization was not justified by this baseline profile.
+
+### Phase B fixed-stack window storage — 2026-09-10
+
+The first isolated adaptive optimization keeps the heap-backed baseline callable and adds `adaptive_median_s3_smax7_stack(...)`. A `std::array<double, 49>` plus a populated-length counter replaces only the temporary window vector; the `3 × 3` to `5 × 5` to `7 × 7` progression, gathering order, min/max work, `std::nth_element`, strict decisions, padding, and fallback are shared unchanged. Output and per-plane padded storage remain normal owned allocations, but the optimized path performs no dynamic allocation per output window.
+
+The 196-value public branch fixture and ignored 4,096-value local fixture matched both Python references and the heap baseline bit for bit. On the representative 143,360-output workload, the heap and stack paths also matched bit for bit, input was unchanged, and all ten diagnostic fields were identical: 143,104 outputs finished at `3 × 3`, 256 reached maximum-window fallback, Stage B retained/replaced 115,240/27,864 values, and 143,872 medians were computed.
+
+Short unpinned trials were visibly bimodal on the hybrid CPU. The authoritative AC-powered A/B sequence therefore pinned the unchanged benchmark process to logical processor 0, alternated implementation order, and used one warm-up plus seven filter-only Release `/O2` calls per path.
+
+| Implementation | Raw times | Median | Min–max | Throughput |
+| --- | --- | ---: | ---: | ---: |
+| heap-window baseline | 15.5671, 15.7173, 15.4751, 15.6822, 15.5931, 15.7079, 16.6181 ms | 15.6822 ms | 15.4751–16.6181 ms | 9.1416 Moutput/s |
+| fixed-stack candidate | 11.0475, 11.3876, 11.2685, 11.1164, 11.0871, 11.2427, 11.1307 ms | 11.1307 ms | 11.0475–11.3876 ms | 12.8797 Moutput/s |
+
+The retained stack path is `1.408914×` faster, removing 29.0234% of median wall time. That is directionally consistent with the original 37.24% sampled heap group, but not expected to match it exactly because sampling is approximate and the remaining work becomes a larger fraction after removal.
+
+The optimized-symbol reprofile collected 6,630 main-thread samples and attributed 6,603 to filter source. Profiler wall time remained perturbed and was not used as benchmark evidence.
+
+| Conservative source/runtime group | Attributed samples | Share |
+| --- | ---: | ---: |
+| `std::nth_element` median selection | 4,574 | 69.27% |
+| window gathering plus min/max | 781 | 11.83% |
+| plane preparation and index/address work | 728 | 11.02% |
+| adaptive control, loops, and output store | 309 | 4.68% |
+| validation and output allocation | 211 | 3.20% |
+
+Per-window allocation/teardown no longer formed a measurable source group; no unexpected replacement hotspot appeared. Because 99.8214% of outputs still terminate at `3 × 3` and median selection is now dominant, the next isolated experiment is a fixed nine-value selector for that common path while retaining `std::nth_element` for the rare `5 × 5` and `7 × 7` windows.
 
 ## Data
 
@@ -495,7 +522,7 @@ reference_data/
         README.md
 ```
 
-Both public pairs are finite, C-contiguous `float64` data generated solely from deterministic integer-valued constructions. The Phase A executable checks its retained serial and OpenMP implementations; the Phase B executable checks the straightforward adaptive baseline. Both compare expected output bit for bit. The larger historical fixtures are not distributed.
+Both public pairs are finite, C-contiguous `float64` data generated solely from deterministic integer-valued constructions. The Phase A executable checks its retained serial and OpenMP implementations; the Phase B executable checks both the straightforward adaptive baseline and fixed-stack implementation. Both compare expected output bit for bit. The larger historical fixtures are not distributed.
 
 ## Regenerating the canonical input
 
@@ -513,7 +540,7 @@ For authorized local scientific work, place the experimental source outside vers
 
 Phase A completed the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
 
-Phase B is the main progression: the exact adaptive contract is now reproduced and validated in clear C++; the next stage is to establish and profile its native performance before any optimization, OpenMP, or CUDA work.
+Phase B is the main progression: the exact adaptive contract is reproduced in clear C++, its native baseline is profiled, and fixed stack storage has removed the measured per-window allocation bottleneck without changing selection or numerical behavior. Specialized nine-value median selection is next; OpenMP and CUDA remain later stages.
 
 ## Status
 
@@ -544,8 +571,9 @@ Completed reference and organization work:
 - final public validation covering the regenerated Python reference, retained serial variants, OpenMP, one-shot CUDA, direct Python CPU paths, and persistent CUDA ownership.
 - correctness-first Phase B C++17 adaptive median with exact public 196-value and local 4,096-value validation against the established Python behavior.
 - reproducible Phase B `(64, 35, 8, 8)` native benchmark, separate branch diagnostics, and optimized-symbol CPU sampling that select temporary-window allocation removal as the first isolated optimization.
+- retained Phase B fixed-stack window storage with exact fixture/workload and branch-counter equivalence, a measured `1.408914×` speedup, and a reprofile showing median selection at 69.27%.
 
-Phase A status: **complete**. Phase B native baseline benchmark/profile status: **complete**. Next: test fixed stack storage as an allocation-only serial optimization while leaving median selection and all numerical decisions unchanged.
+Phase A status: **complete**. Phase B fixed-stack storage status: **complete**. Next: isolate specialized nine-value median selection for the 99.8214% `3 × 3` common path while retaining the general larger-window behavior.
 
 ## Remaining TBDs
 
