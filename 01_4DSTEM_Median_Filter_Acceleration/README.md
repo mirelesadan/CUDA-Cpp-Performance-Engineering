@@ -570,6 +570,33 @@ The same session also measured seven true one-shot calls with fresh internal dev
 
 One-shot pageable copies and sparse launches were visibly variable, and a later read-only device-state check found substantial background desktop GPU activity. The stable back-to-back kernel sequence is therefore the defensible kernel baseline; transfer-inclusive values remain a truthful result for this session rather than a universal estimate. This unoptimized baseline is retained regardless of performance. The next single experiment is focused Nsight Compute profiling of both kernels before proposing any GPU optimization.
 
+### Phase B adaptive CUDA profile — 2026-09-11
+
+Nsight Compute CLI 2025.2.1 profiled one representative post-warm-up canonical launch of each non-diagnostic kernel from the CUDA 12.9, `sm_89`, MSVC Release `/O2` build. The kernel filter skipped the two validation launches and five warm-ups, then captured one launch with 36 focused replay passes covering launch/occupancy, speed-of-light, compute, memory, scheduler, warp-state, instruction, and source-counter sections. `PHASE_B_ENABLE_CUDA_PROFILING_LINEINFO=ON` added source line information only; it defaults to `OFF`, and the normal non-lineinfo Release binary was rebuilt after capture. Profiler duration is replay-perturbed and is not benchmark evidence.
+
+| Metric | plane-minimum kernel | adaptive-filter kernel |
+| --- | ---: | ---: |
+| SM throughput | 20.81% | 64.87% |
+| DRAM throughput | 97.24% | 15.64% |
+| L1/TEX / L2 throughput | 10.73% / 25.61% | 74.70% / 92.97% |
+| L1/TEX / L2 hit rate | 6.32% / 2.62% | 65.56% / 97.81% |
+| registers/thread | 30 | 46 |
+| theoretical / achieved occupancy | 100% / 28.51% | 83.33% / 65.75% |
+| achieved active warps/SM | 13.68 | 31.56 |
+| branch efficiency | 100% | 99.14% |
+
+The 63-block plane-minimum grid covers only 0.29 waves/SM, but its 248.71 GB/s and 97.24% DRAM throughput classify it as a short streaming, bandwidth/long-scoreboard kernel rather than a reduction-synchronization or instruction bottleneck. It uses no local memory and its long-scoreboard wait accounts for approximately 93% of warp cycles between issued instructions. At about 1.8 ms unprofiled, it is only roughly 8% of the two-kernel device time, so even a substantial isolated improvement has limited end-to-end value.
+
+The adaptive kernel is not DRAM-bandwidth limited. Its apparent 92.97% memory ceiling is L2 activity: DRAM utilization is only 15.64%, L2 hit rate is 97.81%, and global loads use 29.69 of 32 bytes per sector. FP64 is the busiest instruction pipeline at 65.52%, followed by LSU at 14.04%. Forty-six registers limit theoretical occupancy to 83.33%, but 65.75% achieved occupancy and 31.56 active warps/SM are sufficient to show that occupancy alone is not the primary limiter.
+
+The explicit `double window[49]` produces a 392-byte per-thread stack frame. Source-correlated SASS maps local operations directly to window gather and selection lines: 16,858,931 local-load and 71,406,120 local-store instructions generated 120,627,354 and 534,134,178 L1 local sectors. Local loads/stores used only 1.12/0.08 of 32 bytes per sector. No separate compiler spill allocation was reported; the measured local traffic is attributable primarily to the explicit stack array, though optimized attribution cannot exclude incidental overlap.
+
+Schedulers had no eligible warp in 84.91% of cycles and averaged only 0.21 eligible warps each. Long-scoreboard dependency waits were dominant at 25.98 cycles per issued instruction and approximately 49.6% of warp cycles, followed by local/global-memory throttle at 11.87 and short-scoreboard at 7.17 cycles. Branch efficiency of 99.14%, together with only 0.1472% canonical expansion beyond `3 × 3`, rules out adaptive divergence as a primary bottleneck.
+
+Source attribution is directional and non-additive because helpers are inlined. The largest sampled sites were the local `window[count++]` store, compare/swap local loads and stores, and min/max comparisons. Rare `5 × 5`/`7 × 7` insertion-sort work was still visible despite its low invocation rate. Coordinate decoding, plane-minimum access, boundary/address logic, and the output store were smaller; the median network and local storage overlap heavily and cannot be assigned clean independent percentages.
+
+The adaptive kernel is therefore mixed local-memory/cache-latency and FP64-instruction limited, not primarily DRAM, divergence, or occupancy limited. Ranked candidates are: (1) split the 99.8528% common `3 × 3` completion path from rare larger-window fallback so the common kernel needs only nine scalar/right-sized values, directly targeting the 392-byte frame and local traffic; (2) replace insertion sort only for the rare 25/49-value paths, targeting disproportionate local shifts but with a low invocation-rate ceiling; (3) improve the mildly uncoalesced global gather pattern, targeting the measured 7% excessive sectors, though the 97.81% L2 hit rate limits expected benefit. The next isolated experiment is candidate 1: a `3 × 3`-only first kernel plus an unchanged-semantics fallback kernel for flagged expansions.
+
 ## Data
 
 Four data roles are deliberately separate:
@@ -656,8 +683,9 @@ Completed reference and organization work:
 - retained Phase B direct padded-row gathering with exact fixture/workload/counter equivalence, a repeatable 6–8% runtime reduction, and a reprofile selecting portable CPU parallelism next.
 - portable Phase B OpenMP detector-plane decomposition with exact public/local/subset/canonical equivalence and a best measured `7.779×` speedup at 16 threads.
 - correctness-first Phase B CUDA with separate global-minimum/adaptive kernels, exact public/local/subset/canonical and diagnostic equivalence, and a 19.757919 ms steady adaptive-kernel median.
+- focused Nsight Compute profiling classifying the adaptive kernel as local-memory/cache-latency plus FP64-instruction limited and selecting common-path storage separation next.
 
-Phase A status: **complete**. Phase B correctness-first adaptive CUDA status: **complete**. Next: profile the retained adaptive CUDA kernels with Nsight Compute before considering optimization.
+Phase A status: **complete**. Phase B adaptive CUDA profiling status: **complete**. Next: isolate a right-sized `3 × 3` first kernel from the rare unchanged larger-window fallback.
 
 ## Remaining TBDs
 

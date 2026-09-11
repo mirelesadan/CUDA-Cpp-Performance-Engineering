@@ -161,6 +161,9 @@ endif()
 # Keep the portable CPU-only build available by default. CUDA targets are
 # enabled explicitly on systems with a CUDA compiler and runtime.
 option(PHASE_A_ENABLE_CUDA "Build the correctness-first CUDA baseline targets" OFF)
+option(PHASE_B_ENABLE_CUDA_PROFILING_LINEINFO
+    "Emit CUDA line information for Phase B Nsight Compute attribution" OFF
+)
 option(PHASE_A_ENABLE_PYTHON "Build the correctness-first pybind11 Python module" OFF)
 option(PHASE_A_ENABLE_PYTHON_COPY_BENCHMARK
     "Expose private copied CPU paths for the Python interface experiment" OFF
@@ -203,6 +206,11 @@ if(PHASE_A_ENABLE_CUDA)
         CUDA_EXTENSIONS NO
         CUDA_ARCHITECTURES "${PHASE_A_CUDA_ARCHITECTURES}"
     )
+    if(PHASE_B_ENABLE_CUDA_PROFILING_LINEINFO)
+        target_compile_options(phase_b_adaptive_cuda_baseline PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
+        )
+    endif()
 
     add_executable(phase_a_cuda_validation
         src/cuda_validation.cpp
