@@ -222,6 +222,12 @@ int main(int argc, char* argv[])
                 input.array.data,
                 dimensions);
         const auto specialized_stop = std::chrono::steady_clock::now();
+        const auto direct_gather_start = std::chrono::steady_clock::now();
+        const std::vector<double> direct_gather =
+            phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather(
+                input.array.data,
+                dimensions);
+        const auto direct_gather_stop = std::chrono::steady_clock::now();
 
         const phase_b::AdaptiveMedianDiagnosticResult baseline_diagnostic =
             phase_b::adaptive_median_s3_smax7_diagnostics(input.array.data, dimensions);
@@ -229,6 +235,10 @@ int main(int argc, char* argv[])
             phase_b::adaptive_median_s3_smax7_stack_diagnostics(input.array.data, dimensions);
         const phase_b::AdaptiveMedianDiagnosticResult specialized_diagnostic =
             phase_b::adaptive_median_s3_smax7_specialized_3x3_diagnostics(
+                input.array.data,
+                dimensions);
+        const phase_b::AdaptiveMedianDiagnosticResult direct_gather_diagnostic =
+            phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather_diagnostics(
                 input.array.data,
                 dimensions);
 
@@ -252,11 +262,19 @@ int main(int argc, char* argv[])
             count_bitwise_mismatches(specialized, specialized_diagnostic.output);
         const std::size_t specialized_statistic_mismatches = count_statistic_mismatches(
             stack_diagnostic.statistics, specialized_diagnostic.statistics);
+        const std::size_t direct_gather_reference_mismatches =
+            count_bitwise_mismatches(direct_gather, reference.array.data);
+        const std::size_t specialized_direct_gather_mismatches =
+            count_bitwise_mismatches(specialized, direct_gather);
+        const std::size_t direct_gather_diagnostic_mismatches =
+            count_bitwise_mismatches(direct_gather, direct_gather_diagnostic.output);
+        const std::size_t direct_gather_statistic_mismatches = count_statistic_mismatches(
+            specialized_diagnostic.statistics, direct_gather_diagnostic.statistics);
 
-        std::size_t first_mismatch = specialized.size();
-        for (std::size_t index = 0; index < specialized.size(); ++index) {
-            if (double_bits(specialized[index]) != double_bits(reference.array.data[index])) {
-                if (first_mismatch == specialized.size()) {
+        std::size_t first_mismatch = direct_gather.size();
+        for (std::size_t index = 0; index < direct_gather.size(); ++index) {
+            if (double_bits(direct_gather[index]) != double_bits(reference.array.data[index])) {
+                if (first_mismatch == direct_gather.size()) {
                     first_mismatch = index;
                 }
             }
@@ -299,6 +317,14 @@ int main(int argc, char* argv[])
                   << "Heap-vs-stack statistic field mismatches: " << statistic_mismatches << '\n'
                   << "Stack-vs-specialized statistic field mismatches: "
                   << specialized_statistic_mismatches << '\n'
+                  << "Direct-gather-vs-reference mismatches: "
+                  << direct_gather_reference_mismatches << '\n'
+                  << "Specialized baseline-vs-direct-gather mismatches: "
+                  << specialized_direct_gather_mismatches << '\n'
+                  << "Direct-gather diagnostic-vs-normal mismatches: "
+                  << direct_gather_diagnostic_mismatches << '\n'
+                  << "Specialized-vs-direct-gather statistic field mismatches: "
+                  << direct_gather_statistic_mismatches << '\n'
                   << "Input bitwise changes: " << input_mismatches << '\n'
                   << std::fixed << std::setprecision(6)
                   << "Heap filter time: "
@@ -309,9 +335,12 @@ int main(int argc, char* argv[])
                          stack_stop - stack_start).count() << " ms\n"
                   << "Specialized filter time: "
                   << std::chrono::duration<double, std::milli>(
-                         specialized_stop - specialized_start).count() << " ms\n";
+                         specialized_stop - specialized_start).count() << " ms\n"
+                  << "Direct-gather filter time: "
+                  << std::chrono::duration<double, std::milli>(
+                         direct_gather_stop - direct_gather_start).count() << " ms\n";
 
-        if (first_mismatch != specialized.size()) {
+        if (first_mismatch != direct_gather.size()) {
             const std::size_t detector_x = first_mismatch % input.array.shape[3];
             std::size_t remaining = first_mismatch / input.array.shape[3];
             const std::size_t detector_y = remaining % input.array.shape[2];
@@ -321,8 +350,8 @@ int main(int argc, char* argv[])
             std::cout << "First mismatch: flat index " << first_mismatch
                       << " at (" << scan_y << ", " << scan_x << ", "
                       << detector_y << ", " << detector_x << ")"
-                      << ", specialized bits 0x" << std::hex
-                      << double_bits(specialized[first_mismatch])
+                      << ", direct-gather bits 0x" << std::hex
+                      << double_bits(direct_gather[first_mismatch])
                       << ", expected bits 0x"
                       << double_bits(reference.array.data[first_mismatch]) << std::dec << '\n';
         }
@@ -341,6 +370,10 @@ int main(int argc, char* argv[])
             specialized_diagnostic_mismatches == 0 &&
             statistic_mismatches == 0 &&
             specialized_statistic_mismatches == 0 &&
+            direct_gather_reference_mismatches == 0 &&
+            specialized_direct_gather_mismatches == 0 &&
+            direct_gather_diagnostic_mismatches == 0 &&
+            direct_gather_statistic_mismatches == 0 &&
             input_mismatches == 0;
         std::cout << "Validation result: " << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 1;

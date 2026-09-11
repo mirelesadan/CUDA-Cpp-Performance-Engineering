@@ -515,6 +515,29 @@ The retained specialized path is `1.311006×` faster, a 23.7227% runtime reducti
 
 Median selection fell by 7.50 percentage points from 69.27% but remains the largest category. The fixed network already removes general-purpose selection from 99.8214% of outputs, so another median micro-optimization is not the next priority. Gathering/min-max and plane/index work now total 27.84%; the next isolated experiment is direct padded-row addressing for the common `3 × 3` gather while preserving all values and decisions.
 
+### Phase B direct padded-row `3 × 3` gathering — 2026-09-11
+
+The third isolated adaptive optimization keeps the specialized stack/network implementation callable and adds an internal A/B candidate without changing the public API. For `3 × 3` only, the candidate computes three padded-row bases once and gathers three consecutive values from each row into the existing stack window in the same row-major order. Min/max comparisons, the 19-comparator selector, all `5 × 5`/`7 × 7` work, padding, adaptive decisions, diagnostics, and output indexing are unchanged.
+
+The 196-value public fixture, ignored 4,096-value local fixture, and all 143,360 representative outputs matched bit for bit. Every diagnostic counter matched, input remained unchanged, and Phase A validation passed. The primary AC-powered, logical-processor-0-controlled sequence alternated implementations after one warm-up and recorded seven filter-only calls each.
+
+| Implementation | Raw times | Median | Min–max | Throughput |
+| --- | --- | ---: | ---: | ---: |
+| specialized `3 × 3` baseline | 8.9269, 9.2407, 8.9210, 9.2412, 9.3963, 9.1518, 8.7797 ms | 9.1518 ms | 8.7797–9.3963 ms | 15.6647 Moutput/s |
+| direct padded-row gather | 8.8916, 8.3730, 8.3097, 8.4542, 8.6883, 9.2289, 8.5972 ms | 8.5972 ms | 8.3097–9.2289 ms | 16.6752 Moutput/s |
+
+The candidate produced a `1.064509×` speedup and 6.0600% median runtime reduction. Two additional controlled sequences repeated the benefit at 8.2231% and 6.6462%, so the change is retained despite individual timing outliers. The optimized-symbol sampler recorded 6,630 main-thread samples with one failed observation and attributed 6,600 to relevant source.
+
+| Conservative source/runtime group | Attributed samples | Share |
+| --- | ---: | ---: |
+| fixed network plus rare larger-window median selection | 3,971 | 60.17% |
+| window gathering plus min/max | 636 | 9.64% |
+| plane preparation and index/address work | 1,242 | 18.82% |
+| adaptive control, loops, and output store | 444 | 6.73% |
+| validation and output allocation | 307 | 4.65% |
+
+The targeted gathering share fell by 4.57 percentage points; unchanged plane preparation and generic indexing became a larger relative share, so percentage totals should not be read as exact component-time accounting. Selection remains dominant but is already a fixed network on the common path. The next experiment is portable OpenMP scaling over independent adaptive work rather than another small scalar micro-optimization.
+
 ## Data
 
 Four data roles are deliberately separate:
@@ -598,8 +621,9 @@ Completed reference and organization work:
 - reproducible Phase B `(64, 35, 8, 8)` native benchmark, separate branch diagnostics, and optimized-symbol CPU sampling that select temporary-window allocation removal as the first isolated optimization.
 - retained Phase B fixed-stack window storage with exact fixture/workload and branch-counter equivalence, a measured `1.408914×` speedup, and a reprofile showing median selection at 69.27%.
 - retained Phase B specialized `3 × 3` selection with exhaustive 362,880-permutation verification, exact adaptive equivalence, a measured `1.311006×` speedup, and a reprofile selecting direct-row gathering next.
+- retained Phase B direct padded-row gathering with exact fixture/workload/counter equivalence, a repeatable 6–8% runtime reduction, and a reprofile selecting portable CPU parallelism next.
 
-Phase A status: **complete**. Phase B specialized nine-value selection status: **complete**. Next: isolate direct padded-row gathering for the 99.8214% `3 × 3` common path without changing neighborhood or decision semantics.
+Phase A status: **complete**. Phase B direct padded-row gathering status: **complete**. Next: measure portable OpenMP scaling of the retained optimized adaptive path without changing numerical semantics.
 
 ## Remaining TBDs
 

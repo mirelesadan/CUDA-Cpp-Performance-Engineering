@@ -140,6 +140,8 @@ The first isolated serial experiment was completed on 2026-09-10. Fixed 49-value
 
 The second isolated serial experiment was completed on 2026-09-10. The Phase A 19-comparator network replaced only the `3 × 3` `std::nth_element` call; larger adaptive windows retained general selection. It passed all 362,880 distinct-rank permutations, ten duplicate patterns, public/local fixtures, all 143,360 benchmark outputs, every branch counter, input immutability, and Phase A regression exactly. Under the established AC-powered, alternating, logical-processor-0 protocol, fresh fixed-stack/specialized medians were 11.3971/8.6934 ms: `1.311006×` speedup, 23.7227% runtime reduction, and 16.4907 Moutput/s. Of 5,328 attributed optimized samples, selection was 61.77%, gathering/min-max 14.21%, plane/index work 13.63%, control/output 6.72%, and validation/output allocation 3.68%. Selection remains largest but is already fixed on 99.8214% of outputs; direct padded-row `3 × 3` gathering is the next higher-value isolated experiment.
 
+The third isolated serial experiment was completed on 2026-09-11. The retained specialized path remains callable, while an internal candidate replaces only the common `3 × 3` nested index loops with three padded-row bases and nine ordered loads; larger-window gathering and every numerical decision remain unchanged. Public, local, and 143,360-output comparisons were bitwise exact, all counters matched, input remained unchanged, and Phase A validation passed. The primary controlled sequence measured 9.1518/8.5972 ms baseline/candidate medians: `1.064509×`, a 6.0600% reduction, and 16.6752 Moutput/s. Two repeated sequences measured 8.2231% and 6.6462% reductions. Of 6,600 attributed candidate samples, selection was 60.17%, gathering/min-max 9.64%, plane/index work 18.82%, control/output 6.73%, and validation/output allocation 4.65%. The targeted gather share fell, while unchanged plane/index work became proportionally larger; the next experiment is portable OpenMP scaling over independent adaptive work rather than another small scalar micro-optimization.
+
 ### Intended contribution
 
 Demonstrate a credible progression from a controlled fixed-window exercise to a measured adaptive bottleneck, then through modern C++, CPU optimization, CUDA, GPU profiling, validation, Python integration, and clear performance reporting.
@@ -276,7 +278,9 @@ All projects currently live in this public parent portfolio, and future work sho
 - [x] Benchmark and profile C++
 - [x] Remove per-window heap allocation with exact fixed-stack storage
 - [x] Specialize and exhaustively verify nine-value selection for the common path
-- [ ] Optimize and re-measure the CPU implementation
+- [x] Replace common-path generic gathering with direct padded-row loads
+- [ ] Measure portable OpenMP scaling of the retained optimized adaptive path
+- [x] Optimize and re-measure the serial CPU implementation
 - [ ] Implement initial CUDA
 - [ ] Validate and profile CUDA
 - [ ] Optimize CUDA in response to measured behavior

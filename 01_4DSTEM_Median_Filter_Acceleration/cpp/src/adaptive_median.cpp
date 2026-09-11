@@ -144,7 +144,7 @@ private:
 using StackWindowStorage = FixedWindowStorage<false>;
 using SpecializedStackWindowStorage = FixedWindowStorage<true>;
 
-template <bool collect_statistics, typename WindowStorage>
+template <bool collect_statistics, typename WindowStorage, bool direct_three_by_three = false>
 std::vector<double> adaptive_median_impl(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions,
@@ -218,17 +218,61 @@ std::vector<double> adaptive_median_impl(
                         double local_minimum = std::numeric_limits<double>::infinity();
                         double local_maximum = -std::numeric_limits<double>::infinity();
 
-                        for (std::size_t window_y = center_y - radius;
-                             window_y <= center_y + radius;
-                             ++window_y) {
-                            for (std::size_t window_x = center_x - radius;
-                                 window_x <= center_x + radius;
-                                 ++window_x) {
-                                const double value = padded_plane[padded_index(
-                                    window_y, window_x, padded_scan_x)];
-                                window.push_back(value);
-                                local_minimum = std::min(local_minimum, value);
-                                local_maximum = std::max(local_maximum, value);
+                        if constexpr (direct_three_by_three) {
+                            if (window_size == 3) {
+                                const std::size_t first_column = center_x - 1;
+                                const double* const top_row = padded_plane.data() +
+                                    (center_y - 1) * padded_scan_x + first_column;
+                                const double* const middle_row = top_row + padded_scan_x;
+                                const double* const bottom_row = middle_row + padded_scan_x;
+                                const auto gather = [&](double value) {
+                                    window.push_back(value);
+                                    local_minimum = std::min(local_minimum, value);
+                                    local_maximum = std::max(local_maximum, value);
+                                };
+
+                                // Preserve the baseline's row-major insertion and
+                                // min/max comparison order while removing generic
+                                // row/column indexing from the common 3x3 path.
+                                gather(top_row[0]);
+                                gather(top_row[1]);
+                                gather(top_row[2]);
+                                gather(middle_row[0]);
+                                gather(middle_row[1]);
+                                gather(middle_row[2]);
+                                gather(bottom_row[0]);
+                                gather(bottom_row[1]);
+                                gather(bottom_row[2]);
+                            }
+                            else {
+                                for (std::size_t window_y = center_y - radius;
+                                     window_y <= center_y + radius;
+                                     ++window_y) {
+                                    for (std::size_t window_x = center_x - radius;
+                                         window_x <= center_x + radius;
+                                         ++window_x) {
+                                        const double value = padded_plane[padded_index(
+                                            window_y, window_x, padded_scan_x)];
+                                        window.push_back(value);
+                                        local_minimum = std::min(local_minimum, value);
+                                        local_maximum = std::max(local_maximum, value);
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            for (std::size_t window_y = center_y - radius;
+                                 window_y <= center_y + radius;
+                                 ++window_y) {
+                                for (std::size_t window_x = center_x - radius;
+                                     window_x <= center_x + radius;
+                                     ++window_x) {
+                                    const double value = padded_plane[padded_index(
+                                        window_y, window_x, padded_scan_x)];
+                                    window.push_back(value);
+                                    local_minimum = std::min(local_minimum, value);
+                                    local_maximum = std::max(local_maximum, value);
+                                }
                             }
                         }
 
@@ -346,5 +390,28 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_specialized_3x3_diagnost
         input, dimensions, result.statistics);
     return result;
 }
+
+namespace detail {
+
+std::vector<double> adaptive_median_s3_smax7_direct_3x3_gather(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    AdaptiveMedianStatistics unused_statistics;
+    return adaptive_median_impl<false, SpecializedStackWindowStorage, true>(
+        input, dimensions, unused_statistics);
+}
+
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_direct_3x3_gather_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    AdaptiveMedianDiagnosticResult result;
+    result.output = adaptive_median_impl<true, SpecializedStackWindowStorage, true>(
+        input, dimensions, result.statistics);
+    return result;
+}
+
+} // namespace detail
 
 } // namespace phase_b

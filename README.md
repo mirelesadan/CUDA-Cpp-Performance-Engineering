@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, a CPU profile, and two retained serial optimizations.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, a CPU profile, and three retained serial optimizations.
 
-The next technical milestone is an isolated Phase B direct padded-row gathering experiment for the overwhelmingly common `3 × 3` path. Projects 2–4 remain planned work.
+The next technical milestone is a portable Phase B OpenMP scaling experiment using the retained optimized scalar path. Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -25,7 +25,8 @@ The next technical milestone is an isolated Phase B direct padded-row gathering 
 | Phase B native benchmark and profile | Complete | Reproducible native timing, branch counters, and source-attributed CPU samples established |
 | Phase B fixed-stack storage | Complete | Removed per-window heap allocation with exact semantics and a measured `1.409×` speedup |
 | Phase B specialized 3×3 selection | Complete | Exhaustively verified 19-comparator network produced a measured `1.311×` speedup |
-| Phase B direct-row gathering | **Next** | Reduce common-path gathering/address work without changing neighborhood semantics |
+| Phase B direct-row gathering | Complete | Three padded-row bases reduced common-path gather/index work by a repeatable 6–8% |
+| Phase B portable OpenMP scaling | **Next** | Measure parallel decomposition without changing adaptive semantics |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -62,7 +63,8 @@ Python reference
   → Phase B native benchmark and profile [complete]
   → Phase B fixed-stack storage [complete]
   → Phase B specialized nine-value selection [complete]
-  → Phase B direct-row gathering experiment [next]
+  → Phase B direct-row gathering [complete]
+  → Phase B portable OpenMP scaling [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -75,7 +77,7 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
         include/adaptive_median.hpp
                                  correctness-first Phase B native API
         include/adaptive_median_detail.hpp
-                                 independently tested Phase B selector primitive
+                                 tested selector primitive and internal experiment hooks
         include/fixed_median_cuda.hpp
                                  CUDA interface, RAII owner, and timing result types
         src/fixed_median_cuda.cu baseline kernel, one-shot path, and resident buffers
