@@ -597,6 +597,16 @@ Source attribution is directional and non-additive because helpers are inlined. 
 
 The adaptive kernel is therefore mixed local-memory/cache-latency and FP64-instruction limited, not primarily DRAM, divergence, or occupancy limited. Ranked candidates are: (1) split the 99.8528% common `3 × 3` completion path from rare larger-window fallback so the common kernel needs only nine scalar/right-sized values, directly targeting the 392-byte frame and local traffic; (2) replace insertion sort only for the rare 25/49-value paths, targeting disproportionate local shifts but with a low invocation-rate ceiling; (3) improve the mildly uncoalesced global gather pattern, targeting the measured 7% excessive sectors, though the 97.81% L2 hit rate limits expected benefit. The next isolated experiment is candidate 1: a `3 × 3`-only first kernel plus an unchanged-semantics fallback kernel for flagged expansions.
 
+### Phase B split adaptive CUDA path — 2026-09-11
+
+The retained candidate separates the profiled common and rare paths without changing the plane-minimum kernel or adaptive semantics. A first kernel gathers only `3 × 3`, uses a nine-double window and the existing compare/swap median network, completes Stage A/B when possible, and writes one dense byte flag per output. A second full-grid kernel reads that flag, returns immediately for common outputs, and applies the unchanged `5 × 5`/`7 × 7` insertion-sort fallback only to flagged outputs. The canonical flag allocation is 47,228,125 bytes (about 45.0 MiB); the common launch overwrites every flag, so no reset or management kernel is required.
+
+Public 196-value, ignored local 4,096-value, representative 143,360-output, and canonical 47,228,125-output comparisons against optimized CPU and the monolithic CUDA baseline were bitwise exact. All ten diagnostic counters matched. Canonically, 47,158,590 outputs (99.852768%) completed in the common kernel, 69,535 (0.147232%) entered fallback, and 66,348 reached `7 × 7`.
+
+With persistent resources, five warm-ups, seven interleaved timed runs, and CUDA events excluding transfers and plane-minimum work, the final-build monolithic adaptive times were `20.480000, 20.496384, 20.466688, 19.705824, 19.701759, 19.767296, 19.718912` ms (median/min/max `19.767296 / 19.701759 / 20.496384` ms). Split combined times were `16.135168, 16.186369, 15.544288, 15.369216, 15.365120, 15.357952, 15.406080` ms (median/min/max `15.406080 / 15.357952 / 16.186369` ms), a `1.283084×` speedup, `22.062783%` reduction, and `3,065.551 Moutput/s`. Common and fallback medians were `14.055424` and `1.337344` ms. Two earlier complete sequences confirmed `1.295295×` and `1.283172×` speedups with `22.797525%` and `22.068145%` reductions; the lowest-variability sequence had a `0.222640%` split-path CV.
+
+Binary resource metadata changed from 46 registers/thread and a 392-byte stack in the monolithic kernel to 40 registers/thread and no stack/local allocation in the common kernel. A focused eight-pass Nsight check measured 100% theoretical and 96.83% achieved occupancy (46.48 active warps/SM), 84.15% SM throughput, and 21.32% DRAM throughput. Scheduler eligibility did not improve—85.89% of cycles still had no eligible warp—so reduced working storage/local traffic and the removal of unused larger-window instruction work are the supported sources of the wall-time gain, while the precise split between them remains an inference. The two-kernel design is retained; the next experiment is a full focused profile of the retained common kernel before selecting another optimization.
+
 ## Data
 
 Four data roles are deliberately separate:
@@ -684,8 +694,9 @@ Completed reference and organization work:
 - portable Phase B OpenMP detector-plane decomposition with exact public/local/subset/canonical equivalence and a best measured `7.779×` speedup at 16 threads.
 - correctness-first Phase B CUDA with separate global-minimum/adaptive kernels, exact public/local/subset/canonical and diagnostic equivalence, and a 19.757919 ms steady adaptive-kernel median.
 - focused Nsight Compute profiling classifying the adaptive kernel as local-memory/cache-latency plus FP64-instruction limited and selecting common-path storage separation next.
+- retained split adaptive CUDA path with exact output/counter equivalence, no common-kernel stack allocation, and a repeatable 22–23% combined-kernel reduction.
 
-Phase A status: **complete**. Phase B adaptive CUDA profiling status: **complete**. Next: isolate a right-sized `3 × 3` first kernel from the rare unchanged larger-window fallback.
+Phase A status: **complete**. Phase B split adaptive CUDA path status: **complete and retained**. Next: profile the retained common kernel before selecting another CUDA optimization.
 
 ## Remaining TBDs
 

@@ -126,13 +126,25 @@ int main(int argc, char* argv[])
         const auto cuda_diagnostic =
             phase_b::adaptive_median_s3_smax7_cuda_baseline_diagnostics(
                 input.array.data, dimensions);
+        const auto split_cuda_diagnostic =
+            phase_b::adaptive_median_s3_smax7_cuda_split_diagnostics(
+                input.array.data, dimensions);
+        const auto split_cuda = phase_b::adaptive_median_s3_smax7_cuda_split(
+            input.array.data, dimensions);
 
         const std::size_t baseline_reference = mismatches(baseline, reference.array.data);
         const std::size_t serial_reference = mismatches(serial, reference.array.data);
         const std::size_t openmp_serial = mismatches(openmp, serial);
         const std::size_t cuda_serial = mismatches(cuda_diagnostic.output, serial);
+        const std::size_t split_cuda_serial = mismatches(split_cuda_diagnostic.output, serial);
+        const std::size_t split_cuda_baseline = mismatches(
+            split_cuda_diagnostic.output, cuda_diagnostic.output);
+        const std::size_t split_cuda_diagnostic_difference = mismatches(
+            split_cuda.output, split_cuda_diagnostic.output);
         const std::size_t diagnostic_difference = statistic_mismatches(
             cpu_diagnostic.statistics, cuda_diagnostic.statistics);
+        const std::size_t split_diagnostic_difference = statistic_mismatches(
+            cpu_diagnostic.statistics, split_cuda_diagnostic.statistics);
         const std::size_t input_changes = mismatches(input.array.data, original);
 
         std::cout << "Compared values: " << input.element_count << '\n'
@@ -140,11 +152,19 @@ int main(int argc, char* argv[])
                   << "Optimized serial vs reference mismatches: " << serial_reference << '\n'
                   << "OpenMP vs optimized serial mismatches: " << openmp_serial << '\n'
                   << "CUDA vs optimized serial mismatches: " << cuda_serial << '\n'
+                  << "Split CUDA vs optimized serial mismatches: " << split_cuda_serial << '\n'
+                  << "Split CUDA vs monolithic CUDA mismatches: " << split_cuda_baseline << '\n'
+                  << "Split CUDA normal vs diagnostic mismatches: "
+                  << split_cuda_diagnostic_difference << '\n'
                   << "CUDA vs CPU diagnostic-counter differences: " << diagnostic_difference << '\n'
+                  << "Split CUDA vs CPU diagnostic-counter differences: "
+                  << split_diagnostic_difference << '\n'
                   << "Input bit changes: " << input_changes << '\n';
         const bool success = baseline_reference == 0 && serial_reference == 0 &&
-            openmp_serial == 0 && cuda_serial == 0 && diagnostic_difference == 0 &&
-            input_changes == 0;
+            openmp_serial == 0 && cuda_serial == 0 && split_cuda_serial == 0 &&
+            split_cuda_baseline == 0 && split_cuda_diagnostic_difference == 0 &&
+            diagnostic_difference == 0 &&
+            split_diagnostic_difference == 0 && input_changes == 0;
         std::cout << "Validation: " << (success ? "PASS" : "FAIL") << '\n';
         return success ? 0 : 1;
     }

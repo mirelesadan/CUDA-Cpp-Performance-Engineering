@@ -33,10 +33,25 @@ struct AdaptiveCudaKernelBenchmarkResult {
     std::vector<double> adaptive_filter_kernel_milliseconds;
 };
 
+struct AdaptiveCudaSplitKernelBenchmarkResult {
+    std::vector<double> monolithic_output;
+    std::vector<double> split_output;
+    std::vector<double> monolithic_adaptive_milliseconds;
+    std::vector<double> common_3x3_milliseconds;
+    std::vector<double> fallback_milliseconds;
+    std::vector<double> split_combined_milliseconds;
+};
+
 // Correctness-first one-shot CUDA baseline. Device allocation is intentionally
 // internal; total_gpu_path spans pageable H2D, both kernels, and pageable D2H,
 // while native_wall also includes validation, allocation, events, and cleanup.
 AdaptiveCudaResult adaptive_median_s3_smax7_cuda_baseline(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions);
+
+// One-shot form of the retained split candidate. Its adaptive_filter_kernel
+// timing spans the common and fallback launches together.
+AdaptiveCudaResult adaptive_median_s3_smax7_cuda_split(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions);
 
@@ -46,9 +61,23 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_cuda_baseline_diagnostic
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions);
 
+// Retained split path: the common kernel uses only a nine-value window,
+// while a dense byte flag selects the rare outputs revisited by the unchanged
+// 5x5/7x7 fallback logic.
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_cuda_split_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions);
+
 // Benchmark-only stable kernel sequence. Buffers and events are reused within
 // this call; this does not expose persistent device ownership to applications.
 AdaptiveCudaKernelBenchmarkResult benchmark_adaptive_median_s3_smax7_cuda_kernels(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    std::size_t warmup_launch_count,
+    std::size_t timed_launch_count);
+
+AdaptiveCudaSplitKernelBenchmarkResult
+benchmark_adaptive_median_s3_smax7_cuda_split_kernels(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions,
     std::size_t warmup_launch_count,

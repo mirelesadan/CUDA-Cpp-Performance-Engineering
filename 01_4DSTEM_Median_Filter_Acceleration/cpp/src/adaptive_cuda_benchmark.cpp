@@ -184,56 +184,67 @@ int main(int argc, char* argv[])
                 subset, subset_dimensions);
         const auto subset_cuda = phase_b::adaptive_median_s3_smax7_cuda_baseline_diagnostics(
             subset, subset_dimensions);
-        const auto canonical_cpu =
+        const auto subset_split = phase_b::adaptive_median_s3_smax7_cuda_split_diagnostics(
+            subset, subset_dimensions);
+        auto canonical_cpu =
             phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather_diagnostics(
                 canonical.array.data, dimensions);
-        const auto canonical_cuda = phase_b::adaptive_median_s3_smax7_cuda_baseline_diagnostics(
+        auto canonical_cuda = phase_b::adaptive_median_s3_smax7_cuda_baseline_diagnostics(
+            canonical.array.data, dimensions);
+        auto canonical_split = phase_b::adaptive_median_s3_smax7_cuda_split_diagnostics(
             canonical.array.data, dimensions);
         const std::size_t subset_output_mismatches = mismatches(subset_cpu.output, subset_cuda.output);
+        const std::size_t subset_split_output_mismatches = mismatches(
+            subset_cpu.output, subset_split.output);
         const std::size_t subset_counter_mismatches = statistic_mismatches(
             subset_cpu.statistics, subset_cuda.statistics);
+        const std::size_t subset_split_counter_mismatches = statistic_mismatches(
+            subset_cpu.statistics, subset_split.statistics);
         const std::size_t canonical_output_mismatches = mismatches(
             canonical_cpu.output, canonical_cuda.output);
+        const std::size_t canonical_split_output_mismatches = mismatches(
+            canonical_cpu.output, canonical_split.output);
+        const std::size_t canonical_split_baseline_mismatches = mismatches(
+            canonical_cuda.output, canonical_split.output);
         const std::size_t canonical_counter_mismatches = statistic_mismatches(
             canonical_cpu.statistics, canonical_cuda.statistics);
-        if (subset_output_mismatches != 0 || subset_counter_mismatches != 0 ||
-            canonical_output_mismatches != 0 || canonical_counter_mismatches != 0) {
+        const std::size_t canonical_split_counter_mismatches = statistic_mismatches(
+            canonical_cpu.statistics, canonical_split.statistics);
+        if (subset_output_mismatches != 0 || subset_split_output_mismatches != 0 ||
+            subset_counter_mismatches != 0 || subset_split_counter_mismatches != 0 ||
+            canonical_output_mismatches != 0 || canonical_split_output_mismatches != 0 ||
+            canonical_split_baseline_mismatches != 0 || canonical_counter_mismatches != 0 ||
+            canonical_split_counter_mismatches != 0) {
             throw std::runtime_error("CUDA correctness or diagnostic counters differ from optimized CPU.");
         }
 
-        const auto kernel_sequence =
-            phase_b::benchmark_adaptive_median_s3_smax7_cuda_kernels(
+        std::vector<double>().swap(canonical_cuda.output);
+        std::vector<double>().swap(canonical_split.output);
+        const auto split_sequence =
+            phase_b::benchmark_adaptive_median_s3_smax7_cuda_split_kernels(
                 canonical.array.data, dimensions, 5, 7);
-        if (mismatches(kernel_sequence.output, canonical_cpu.output) != 0) {
-            throw std::runtime_error("Stable kernel-sequence output differs from optimized CPU.");
-        }
-
-        for (int warmup = 0; warmup < 5; ++warmup) {
-            const auto ignored = phase_b::adaptive_median_s3_smax7_cuda_baseline(
-                canonical.array.data, dimensions);
-        }
-
-        std::vector<double> h2d, minima, adaptive, d2h, total, wall;
-        std::vector<double> final_timed_output;
-        for (int run = 0; run < 7; ++run) {
-            auto result = phase_b::adaptive_median_s3_smax7_cuda_baseline(
-                canonical.array.data, dimensions);
-            h2d.push_back(result.timing.host_to_device);
-            minima.push_back(result.timing.plane_minimum_kernel);
-            adaptive.push_back(result.timing.adaptive_filter_kernel);
-            d2h.push_back(result.timing.device_to_host);
-            total.push_back(result.timing.total_gpu_path);
-            wall.push_back(result.timing.native_wall);
-            final_timed_output = std::move(result.output);
-        }
-        if (mismatches(final_timed_output, canonical_cpu.output) != 0) {
-            throw std::runtime_error("Final timed CUDA output differs from optimized CPU.");
+        const std::size_t timed_monolithic_mismatches = mismatches(
+            split_sequence.monolithic_output, canonical_cpu.output);
+        const std::size_t timed_split_mismatches = mismatches(
+            split_sequence.split_output, canonical_cpu.output);
+        const std::size_t timed_split_baseline_mismatches = mismatches(
+            split_sequence.monolithic_output, split_sequence.split_output);
+        if (timed_monolithic_mismatches != 0 || timed_split_mismatches != 0 ||
+            timed_split_baseline_mismatches != 0) {
+            throw std::runtime_error("Timed monolithic or split CUDA output differs from optimized CPU.");
         }
 
         const auto configuration = phase_b::adaptive_median_cuda_kernel_configuration(dimensions);
-        const Summary adaptive_summary = summarize(
-            kernel_sequence.adaptive_filter_kernel_milliseconds);
-        const Summary total_summary = summarize(total);
+        const Summary monolithic_summary = summarize(
+            split_sequence.monolithic_adaptive_milliseconds);
+        const Summary common_summary = summarize(split_sequence.common_3x3_milliseconds);
+        const Summary fallback_summary = summarize(split_sequence.fallback_milliseconds);
+        const Summary split_summary = summarize(split_sequence.split_combined_milliseconds);
+        const auto& statistics = canonical_cpu.statistics;
+        const double total_outputs = static_cast<double>(statistics.total_outputs);
+        const double speedup = monolithic_summary.median / split_summary.median;
+        const double runtime_reduction =
+            100.0 * (1.0 - split_summary.median / monolithic_summary.median);
         std::cout << std::fixed << std::setprecision(6)
                   << "Canonical shape: (" << dimensions.scan_y << ',' << dimensions.scan_x
                   << ',' << dimensions.detector_y << ',' << dimensions.detector_x << ")\n"
@@ -242,30 +253,42 @@ int main(int argc, char* argv[])
                   << ',' << subset_dimensions.detector_y << ',' << subset_dimensions.detector_x << ")\n"
                   << "Subset output/counter mismatches: " << subset_output_mismatches << " / "
                   << subset_counter_mismatches << '\n'
+                  << "Subset split output/counter mismatches: "
+                  << subset_split_output_mismatches << " / "
+                  << subset_split_counter_mismatches << '\n'
                   << "Canonical output/counter mismatches: " << canonical_output_mismatches << " / "
                   << canonical_counter_mismatches << '\n'
+                  << "Canonical split output/baseline/counter mismatches: "
+                  << canonical_split_output_mismatches << " / "
+                  << canonical_split_baseline_mismatches << " / "
+                  << canonical_split_counter_mismatches << '\n'
+                  << "Timed monolithic/split/between-output mismatches: "
+                  << timed_monolithic_mismatches << " / " << timed_split_mismatches << " / "
+                  << timed_split_baseline_mismatches << '\n'
                   << "Threads/block, plane-min blocks, adaptive blocks: "
                   << configuration.threads_per_block << " / "
                   << configuration.plane_minimum_blocks << " / "
-                  << configuration.adaptive_filter_blocks << '\n';
-        print_series("H2D", h2d);
-        print_series("Steady plane minimum kernel", kernel_sequence.plane_minimum_kernel_milliseconds);
-        print_series("Steady adaptive filter kernel", kernel_sequence.adaptive_filter_kernel_milliseconds);
-        print_series("Sparse one-shot plane minimum kernel", minima);
-        print_series("Sparse one-shot adaptive filter kernel", adaptive);
-        print_series("D2H", d2h);
-        print_series("Total GPU path", total);
-        print_series("Native one-shot wall", wall);
-        std::cout << "Adaptive kernel throughput (Moutput/s): "
-                  << canonical.element_count / (adaptive_summary.median * 1000.0) << '\n'
-                  << "Kernel-only speedup vs serial 3318.3376 ms: "
-                  << 3318.3376 / adaptive_summary.median << '\n'
-                  << "Kernel-only speedup vs OpenMP-16 426.5593 ms: "
-                  << 426.5593 / adaptive_summary.median << '\n'
-                  << "One-shot GPU-path speedup vs serial 3318.3376 ms: "
-                  << 3318.3376 / total_summary.median << '\n'
-                  << "One-shot GPU-path speedup vs OpenMP-16 426.5593 ms: "
-                  << 426.5593 / total_summary.median << '\n';
+                  << configuration.adaptive_filter_blocks << '\n'
+                  << "Dense fallback flag bytes: " << canonical.element_count << '\n'
+                  << "Resolved at 3x3 count/percent: " << statistics.finished_at_3x3 << " / "
+                  << 100.0 * statistics.finished_at_3x3 / total_outputs << '\n'
+                  << "Sent to fallback count/percent: " << statistics.expanded_to_5x5 << " / "
+                  << 100.0 * statistics.expanded_to_5x5 / total_outputs << '\n'
+                  << "Reached 5x5 / reached 7x7: " << statistics.expanded_to_5x5 << " / "
+                  << statistics.expanded_to_7x7 << '\n';
+        print_series("Monolithic adaptive", split_sequence.monolithic_adaptive_milliseconds);
+        print_series("Split common 3x3", split_sequence.common_3x3_milliseconds);
+        print_series("Split fallback 5x5/7x7", split_sequence.fallback_milliseconds);
+        print_series("Split combined adaptive", split_sequence.split_combined_milliseconds);
+        std::cout << "Separate flag/reset/management kernel time (ms): 0.000000\n"
+                  << "Split speedup: " << speedup << '\n'
+                  << "Split runtime reduction (%): " << runtime_reduction << '\n'
+                  << "Split throughput (Moutput/s): "
+                  << canonical.element_count / (split_summary.median * 1000.0) << '\n'
+                  << "Monolithic throughput (Moutput/s): "
+                  << canonical.element_count / (monolithic_summary.median * 1000.0) << '\n'
+                  << "Common/fallback medians (ms): " << common_summary.median << " / "
+                  << fallback_summary.median << '\n';
         return 0;
     }
     catch (const std::exception& error) {
