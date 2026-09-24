@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings use direct validated NumPy buffers, and the CUDA binding offers both one-shot execution and explicit persistent device ownership. Phase B has progressed from its exact native adaptive-median baseline through measured CPU and CUDA work to native transfer/residency characterization; an adaptive Python owner is not yet implemented.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings use direct validated NumPy buffers, and the CUDA binding offers both one-shot execution and explicit persistent device ownership. Phase B has progressed from its exact native adaptive-median baseline through measured CPU and CUDA work to a persistent adaptive CUDA Python owner.
 
 ## Performance boundary
 
@@ -85,6 +85,7 @@ cpp/
     build/              # generated; ignored by Git
 python/
     validate_bindings.py
+    validate_adaptive_cuda_owner.py
 ```
 
 `fixed_median.cpp` contains the correctness-first fixed `3 × 3` implementation: half-sample symmetric reflection on the two scan axes, nine-value median selection, and separate input/output storage. `main.cpp` loads and validates an input/reference pair and compares every `double` by its `uint64_t` bit representation. The public default is a deterministic synthetic fixture; alternate compatible arrays may be supplied explicitly. General shape is discovered at runtime.
@@ -123,6 +124,7 @@ cmake -S cpp -B cpp/out/python -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Pro
 cmake --build cpp/out/python --config Release --target fourdstem_median
 set PYTHONPATH=%CD%\cpp\out\python\Release
 C:\Users\haloe\anaconda3\envs\hanlab\python.exe python\validate_bindings.py
+C:\Users\haloe\anaconda3\envs\hanlab\python.exe python\validate_adaptive_cuda_owner.py
 ```
 
 Omit `PHASE_A_ENABLE_CUDA` and the CUDA toolset selection for a CPU-only extension. The build copies the CUDA runtime DLL beside a CUDA-enabled Windows module so modern Python can load it without a process-wide `PATH` change. Linux compilation remains unverified.
@@ -673,7 +675,45 @@ The seven pageable native-wall runs ranged 223.877–247.540 ms (3.60% CV); even
 
 The 20-operation effective-cost series ranged 24.325–25.862 ms/filter (2.22% CV). The fresh serial/OpenMP-16 filter-call medians were 3275.932/424.181 ms; pageable one-shot **native wall** was `13.967×/1.809×` faster. The 20-operation **GPU-path-only** effective cost was `3.815×` lower than pageable one-shot's event path and `133.240×/17.252×` lower than the CPU filter-call medians; this last comparison has different allocation/host timing boundaries and is not a Python end-to-end speedup. An earlier full AC-powered sequence confirmed the directional result despite laptop drift: pageable/pinned native-wall medians were 248.268/289.093 ms, and 20 resident operations cost 22.891 ms/filter. The original 264.061 ms one-shot event median above belongs to the earlier monolithic CUDA baseline, not this retained balanced split path.
 
-Canonical resident device storage is 377,825,000 bytes each for input and output, 127,000 bytes for plane minima, and 47,228,125 bytes for dense flags: 803,005,125 bytes total (about 765.8 MiB), excluding the separate benchmark-only 377,825,000-byte pinned host staging buffer. Transfer remains the majority of a single GPU path and falls below one fifth of the measured 20-operation path; the complete device pipeline stays near 20 ms/filter. The next step is a persistent adaptive CUDA Python owner analogous to Phase A's `CudaMedianBuffer`, so callers can deliberately amortize transfers without changing the kernels or numerical contract.
+Canonical resident device storage is 377,825,000 bytes each for input and output, 127,000 bytes for plane minima, and 47,228,125 bytes for dense flags: 803,005,125 bytes total (about 765.8 MiB), excluding the separate benchmark-only 377,825,000-byte pinned host staging buffer. Transfer remains the majority of a single GPU path and falls below one fifth of the measured 20-operation path; the complete device pipeline stays near 20 ms/filter. This evidence motivated the persistent adaptive CUDA Python owner below, so callers can deliberately amortize transfers without changing the kernels or numerical contract.
+
+### Phase B persistent adaptive CUDA Python ownership — 2026-09-24
+
+The CUDA-enabled `fourdstem_median` module now exposes one `CudaAdaptiveMedianBuffer(shape)` owner for a fixed `(scan_y, scan_x, detector_y, detector_x)` shape:
+
+```python
+buffer = fourdstem_median.CudaAdaptiveMedianBuffer(array.shape)
+buffer.upload(array)
+buffer.filter()
+result = buffer.download()
+```
+
+Construction allocates device input/output, plane minima, and dense fallback flags once. `upload()` validates a four-dimensional, nonempty, C-contiguous, finite, exact-`float64` NumPy array of the allocated shape, then copies directly from its live buffer to the device; there is no NumPy→`std::vector` copy. Every synchronous `filter()` runs the unchanged retained plane-minimum, balanced `3 × 3` common, and rare `5 × 5`/`7 × 7` fallback kernels. It always reads the most recently uploaded input and overwrites output/flags, so repeated calls are independent rather than chained. A new upload invalidates the previous output. `download()` requires a successful filter and copies into a new, C-contiguous, independently owned NumPy array; the device result remains available for later downloads. One object owns exactly 803,005,125 canonical device-buffer bytes (~765.8 MiB), matching the native study, including 47,228,125 flag bytes; CUDA context/runtime overhead is separate. No pinned staging, diagnostic-output allocation, streams, or kernel changes were introduced.
+
+Existing pybind11 validation and native error translation are reused. Shape/dtype/layout/finite errors, filtering before upload, and downloading before filtering or after replacement upload raise Python exceptions. The binding releases the GIL during allocation, synchronous H2D, complete filtering/synchronization, and D2H; NumPy validation and output creation keep it. A native mutex serializes concurrent operations on the same owner. The public Python reference (196), ignored local reference (4,096), centered canonical subset (143,360), and all 47,228,125 canonical outputs matched optimized CPU/retained balanced CUDA bit for bit through this API. Input immutability, repeated outputs, replacement upload, output independence, invalid inputs, and existing Phase A/B native/Python regressions passed. Ten adaptive diagnostic counters remain verified through the separate native path, without taxing ordinary Python filtering.
+
+The AC-powered CUDA 12.9 `sm_89` Release Python check warmed each workflow, then collected five same-session trials per configuration with rotating resident-count order and interleaved one-shot-equivalent calls. Because no adaptive one-shot Python API existed, that control constructs and releases a new owner around one upload/filter/download; resident totals reuse an already allocated owner and time one upload, 1/2/5/10/20 complete synchronous filters, and one new-array download. File I/O and bitwise comparisons are outside timing. These Python wall times are not native CUDA-event or kernel-only measurements.
+
+| Python workflow | Raw effective ms/filter | Median ms/filter | Speedup vs one-call owner |
+| --- | --- | ---: | ---: |
+| new owner, one call | 184.567, 181.457, 187.035, 185.559, 183.446 | 184.567 | 1.000× |
+| resident 1 | 178.781, 176.701, 220.831, 174.559, 176.812 | 176.812 | 1.044× |
+| resident 2 | 99.818, 100.272, 109.273, 97.959, 96.966 | 99.818 | 1.849× |
+| resident 5 | 51.700, 51.493, 51.841, 51.842, 51.523 | 51.700 | 3.570× |
+| resident 10 | 36.162, 35.369, 35.897, 37.596, 37.216 | 36.162 | 5.104× |
+| resident 20 | 28.081, 28.221, 28.886, 28.384, 28.180 | 28.221 | 6.540× |
+
+At 20 calls, upload, complete `filter()` calls, and download had medians of 89.719 ms, 20.312 ms/filter, and 66.490 ms. Python upload includes finite validation; download includes NumPy allocation. The native resident experiment's 24.587 ms/filter and ~20.197 ms complete-device cost used different event-only boundaries and an earlier session. An independent five-trial Python sequence confirmed 193.526 ms for a new one-call owner and 28.268 ms/filter at 20 resident calls (`6.846×`), while showing the expected pageable/laptop variability. The result supports persistent ownership, not adding pinned staging or another kernel micro-optimization.
+
+The public script runs without private data. For local full-data reproduction from this project directory, generate ignored native outputs already cross-validated against optimized CPU and retained CUDA, then run the Python API check:
+
+```bat
+cmake --build cpp/out/python --config Release --target phase_b_cuda_transfer
+cpp\out\python\Release\phase_b_cuda_transfer.exe --export-reference cpp\out\python\phaseb_subset_expected.npy cpp\out\python\phaseb_canonical_expected.npy
+C:\Users\haloe\anaconda3\envs\hanlab\python.exe python\validate_adaptive_cuda_owner.py --canonical-input benchmark_data\median_filter_input.npy --subset-expected cpp\out\python\phaseb_subset_expected.npy --canonical-expected cpp\out\python\phaseb_canonical_expected.npy
+```
+
+Use unused output names on subsequent runs; the exporter refuses to overwrite existing files. The two exported outputs and research-derived input remain local and ignored by Git.
 
 ## Data
 
@@ -725,7 +765,7 @@ For authorized local scientific work, place the experimental source outside vers
 
 Phase A completed the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
 
-Phase B reproduces the exact adaptive contract in clear C++, then progresses through profiled serial optimizations, portable OpenMP, an exact CUDA baseline, a retained common/fallback CUDA split, and an isolated balanced min/max reduction. A lower-dependency median network was validated but rejected after paired timing. Native transfer/residency characterization now points to explicit persistent adaptive GPU ownership for future Python use, rather than further kernel micro-optimization.
+Phase B reproduces the exact adaptive contract in clear C++, then progresses through profiled serial optimizations, portable OpenMP, an exact CUDA baseline, a retained common/fallback CUDA split, and an isolated balanced min/max reduction. A lower-dependency median network was validated but rejected after paired timing. Native transfer/residency characterization led to a validated persistent adaptive CUDA Python owner. The established finite-`float64`, `s=3`, `sMax=7` Windows workflow is now complete; broader portability and shape scaling are separate future work.
 
 ## Status
 
@@ -767,8 +807,9 @@ Completed reference and organization work:
 - retained balanced min/max common-kernel variant with exact public/local/subset/canonical and counter agreement, a repeatable 6.63–8.70% common-kernel reduction, and a focused resource/stall comparison.
 - rejected lower-dependency median network: exact selector and full-workload results, but a repeatable 5.23% common-kernel regression despite fewer registers.
 - characterized the retained balanced CUDA path with exact pageable, pinned-staged, and resident outputs; a fresh pageable one-shot native-wall median of 234.543 ms, 20-operation GPU-path effective cost of 24.587 ms/filter, and pinned staging that reduced isolated transfers but slowed the complete one-shot call.
+- added `CudaAdaptiveMedianBuffer` with explicit upload/filter/download, bitwise-exact public/local/subset/canonical Python outputs, and a measured 28.221 ms/filter across 20 resident calls (`6.540×` versus the fresh one-call owner baseline).
 
-Phase A status: **complete**. Phase B balanced split adaptive CUDA variant and native transfer/residency characterization: **complete**. Next: implement a persistent adaptive CUDA Python owner without changing the retained kernels.
+Phase A status: **complete**. Phase B status for the established Windows finite-`float64`, `s=3`, `sMax=7` contract: **complete**. Next portfolio milestone: define the exact scientific 3D neighborhood/transformation contract and reference for Project 2 before native implementation.
 
 ## Remaining TBDs
 

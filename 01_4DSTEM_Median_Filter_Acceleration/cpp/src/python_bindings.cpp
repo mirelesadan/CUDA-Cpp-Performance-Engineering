@@ -1,6 +1,7 @@
 #include "fixed_median.hpp"
 
 #ifdef PHASE_A_PYTHON_CUDA_ENABLED
+#include "adaptive_median_cuda.hpp"
 #include "fixed_median_cuda.hpp"
 #endif
 
@@ -31,6 +32,37 @@ struct CopiedInput {
     std::array<py::ssize_t, 4> shape;
     std::vector<double> values;
 };
+
+phase_a::Dimensions4D validate_shape(const py::handle shape_object)
+{
+    if (!py::isinstance<py::sequence>(shape_object)) {
+        throw py::type_error("shape must be a sequence of four positive dimensions");
+    }
+    const py::sequence shape = py::reinterpret_borrow<py::sequence>(shape_object);
+    if (py::len(shape) != 4) {
+        throw py::value_error("shape must have exactly four dimensions");
+    }
+    std::array<std::size_t, 4> extents{};
+    for (py::ssize_t axis = 0; axis < 4; ++axis) {
+        const py::handle value = shape[axis];
+        if (!py::isinstance<py::int_>(value) || py::isinstance<py::bool_>(value)) {
+            throw py::type_error("shape dimensions must be integers");
+        }
+        const py::ssize_t extent = py::cast<py::ssize_t>(value);
+        if (extent <= 0) {
+            throw py::value_error("shape dimensions must be positive");
+        }
+        extents[static_cast<std::size_t>(axis)] = static_cast<std::size_t>(extent);
+    }
+    return {extents[0], extents[1], extents[2], extents[3]};
+}
+
+bool same_dimensions(const phase_a::Dimensions4D& left,
+                     const phase_a::Dimensions4D& right)
+{
+    return left.scan_y == right.scan_y && left.scan_x == right.scan_x &&
+           left.detector_y == right.detector_y && left.detector_x == right.detector_x;
+}
 
 ValidatedInput validate_input_metadata(const py::handle input_object)
 {
@@ -144,7 +176,7 @@ py::array_t<double> run_direct_filter(const py::handle input_object, Filter&& fi
 PYBIND11_MODULE(fourdstem_median, module)
 {
     module.doc() =
-        "Python bindings for the Phase A 4D-STEM fixed median filter.";
+        "Python bindings for Project 1 fixed and adaptive 4D-STEM median filters.";
 
     module.def(
         "fixed_median_serial",
@@ -184,6 +216,70 @@ PYBIND11_MODULE(fourdstem_median, module)
         "Apply the optimized OpenMP fixed 3x3 scan-space median filter.");
 
 #ifdef PHASE_A_PYTHON_CUDA_ENABLED
+    py::class_<phase_b::CudaAdaptiveMedianBuffer>(module, "CudaAdaptiveMedianBuffer")
+        .def(
+            py::init([](const py::object& shape_object) {
+                const phase_a::Dimensions4D dimensions = validate_shape(shape_object);
+                std::unique_ptr<phase_b::CudaAdaptiveMedianBuffer> buffer;
+                {
+                    py::gil_scoped_release release;
+                    buffer = std::make_unique<phase_b::CudaAdaptiveMedianBuffer>(dimensions);
+                }
+                return buffer;
+            }),
+            py::arg("shape"),
+            "Allocate persistent input, output, plane-minimum, and fallback-flag buffers.")
+        .def(
+            "upload",
+            [](phase_b::CudaAdaptiveMedianBuffer& buffer, const py::object& input_object) {
+                const ValidatedInput input = validate_input_metadata(input_object);
+                if (!same_dimensions(input.dimensions, buffer.dimensions())) {
+                    throw py::value_error("input shape does not match the allocated shape");
+                }
+                validate_finite_values(input);
+                {
+                    // The Python owner remains alive until synchronous H2D completes.
+                    py::gil_scoped_release release;
+                    buffer.upload(input.data);
+                }
+            },
+            py::arg("array"),
+            "Replace the resident input explicitly; invalidates the prior output.")
+        .def(
+            "filter",
+            [](phase_b::CudaAdaptiveMedianBuffer& buffer) {
+                py::gil_scoped_release release;
+                buffer.filter();
+            },
+            "Run plane minimum, balanced 3x3 common path, and rare fallback on the uploaded input.")
+        .def(
+            "download",
+            [](const phase_b::CudaAdaptiveMedianBuffer& buffer) {
+                const auto dimensions = buffer.dimensions();
+                const std::array<py::ssize_t, 4> shape = {
+                    static_cast<py::ssize_t>(dimensions.scan_y),
+                    static_cast<py::ssize_t>(dimensions.scan_x),
+                    static_cast<py::ssize_t>(dimensions.detector_y),
+                    static_cast<py::ssize_t>(dimensions.detector_x),
+                };
+                py::array_t<double> output(shape);
+                double* const output_data = output.mutable_data();
+                {
+                    py::gil_scoped_release release;
+                    buffer.download(output_data);
+                }
+                return output;
+            },
+            "Download the resident result to a new independent NumPy array.")
+        .def_property_readonly(
+            "shape",
+            [](const phase_b::CudaAdaptiveMedianBuffer& buffer) {
+                const auto dimensions = buffer.dimensions();
+                return py::make_tuple(dimensions.scan_y, dimensions.scan_x,
+                                      dimensions.detector_y, dimensions.detector_x);
+            },
+            "The fixed resident shape in scan_y, scan_x, detector_y, detector_x order.");
+
     py::class_<phase_a::CudaMedianBuffer>(module, "CudaMedianBuffer")
         .def(
             py::init([](const py::object& input_object) {

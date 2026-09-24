@@ -221,16 +221,51 @@ std::vector<double> validate_workload(
     return std::move(cuda.output);
 }
 
+void export_validated_reference(const std::filesystem::path& path,
+                                const std::vector<double>& output,
+                                const phase_a::Dimensions4D& dimensions)
+{
+    if (std::filesystem::exists(path)) {
+        throw std::runtime_error("Refusing to overwrite reference output: " + path.string());
+    }
+    npy::shape_t shape;
+    for (const std::size_t extent : {dimensions.scan_y, dimensions.scan_x,
+                                     dimensions.detector_y, dimensions.detector_x}) {
+        if (extent > std::numeric_limits<npy::ndarray_len_t>::max()) {
+            throw std::overflow_error("Reference shape exceeds NPY writer limits.");
+        }
+        shape.push_back(static_cast<npy::ndarray_len_t>(extent));
+    }
+    std::ofstream stream(path, std::ios::binary);
+    if (!stream) throw std::runtime_error("Could not create reference output: " + path.string());
+    const npy::npy_data_ptr<double> array{output.data(), shape, false};
+    npy::write_npy<double>(stream, array);
+    if (!stream) throw std::runtime_error("Could not write complete reference output: " + path.string());
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
     try {
-        if (argc > 2) {
+        const bool export_reference = argc == 4 &&
+            std::string(argv[1]) == "--export-reference";
+        if ((!export_reference && argc > 2) ||
+            (argc == 2 && std::string(argv[1]) == "--export-reference")) {
             throw std::runtime_error(
-                "Usage: phase_b_cuda_transfer.exe [canonical_input.npy | --validate-only]");
+                "Usage: phase_b_cuda_transfer.exe [canonical_input.npy | --validate-only | --export-reference subset.npy canonical.npy]");
         }
         const bool validate_only = argc == 2 && std::string(argv[1]) == "--validate-only";
+        if (export_reference) {
+            const auto subset_path = std::filesystem::weakly_canonical(argv[2]);
+            const auto canonical_path = std::filesystem::weakly_canonical(argv[3]);
+            if (subset_path == canonical_path) {
+                throw std::runtime_error("Reference output paths must be distinct.");
+            }
+            if (std::filesystem::exists(subset_path) || std::filesystem::exists(canonical_path)) {
+                throw std::runtime_error("Refusing to overwrite an existing reference output.");
+            }
+        }
         std::cout << std::fixed << std::setprecision(6);
         const auto public_input = load_npy(PHASE_B_REFERENCE_INPUT_PATH);
         const auto public_expected = load_npy(PHASE_B_REFERENCE_OUTPUT_PATH);
@@ -257,8 +292,14 @@ int main(int argc, char* argv[])
         const Workload canonical = load_npy(
             argc == 2 && !validate_only ? argv[1] : PHASE_B_BENCHMARK_INPUT_PATH);
         const Workload subset = centered_subset(canonical);
-        validate_workload(subset, nullptr, "Representative subset");
+        const auto subset_expected = validate_workload(subset, nullptr, "Representative subset");
         const auto expected = validate_workload(canonical, nullptr, "Canonical workload");
+        if (export_reference) {
+            export_validated_reference(argv[2], subset_expected, subset.dimensions);
+            export_validated_reference(argv[3], expected, canonical.dimensions);
+            std::cout << "Validated native subset/canonical reference outputs exported.\n";
+            return 0;
+        }
         if (validate_only) {
             std::cout << "Transfer-mode correctness: PASS; timing intentionally skipped.\n";
             return 0;

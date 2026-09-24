@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "adaptive_median.hpp"
@@ -47,6 +48,29 @@ struct AdaptiveCudaBalancedCommonBenchmarkResult {
     std::vector<double> candidate_output;
     std::vector<double> baseline_common_milliseconds;
     std::vector<double> candidate_common_milliseconds;
+};
+
+// Persistent ownership for the retained balanced split adaptive pipeline.
+// Each filter call reads the last uploaded input and overwrites the output;
+// calls do not chain the preceding output into the next input.
+class CudaAdaptiveMedianBuffer {
+public:
+    explicit CudaAdaptiveMedianBuffer(const phase_a::Dimensions4D& dimensions);
+    ~CudaAdaptiveMedianBuffer();
+
+    CudaAdaptiveMedianBuffer(const CudaAdaptiveMedianBuffer&) = delete;
+    CudaAdaptiveMedianBuffer& operator=(const CudaAdaptiveMedianBuffer&) = delete;
+    CudaAdaptiveMedianBuffer(CudaAdaptiveMedianBuffer&&) = delete;
+    CudaAdaptiveMedianBuffer& operator=(CudaAdaptiveMedianBuffer&&) = delete;
+
+    void upload(const double* host_input);
+    void filter();
+    void download(double* host_output) const;
+    phase_a::Dimensions4D dimensions() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 // Correctness-first one-shot CUDA baseline. Device allocation is intentionally

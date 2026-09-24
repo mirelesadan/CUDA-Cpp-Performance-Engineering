@@ -1,8 +1,8 @@
 # CUDA C++ Performance Engineering Portfolio
 
-This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, three retained serial optimizations, portable OpenMP, and a profiled CUDA implementation with a retained split common path.
+This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phases A and B are complete** for their established finite-`float64` Windows contracts. Phase A took a four-dimensional fixed median from an authoritative Python/4Denoise reference through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B extended that process to adaptive median filtering, ending with validated persistent adaptive CUDA ownership for Python.
 
-The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization is complete; the next technical milestone is persistent adaptive CUDA ownership for Python. Projects 2–4 remain planned work.
+The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership; the next portfolio milestone is to define Project 2's exact 3D-median scientific contract. Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -34,7 +34,8 @@ The retained Phase B split CUDA path includes a measured balanced nine-value min
 | Phase B min/max reduction experiment | Complete | Exact balanced reduction retained after repeatable ~7–9% common-kernel gains despite lower occupancy |
 | Phase B median-network experiment | Complete; rejected | Exact candidate regressed common-kernel time by 5.23%; retained selector unchanged |
 | Phase B adaptive CUDA transfers/residency | Complete | Pageable/pinned one-shot paths and repeated full-device operations measured with exact outputs |
-| Phase B persistent adaptive Python CUDA owner | Next | Expose deliberate device residency without changing the retained kernels |
+| Phase B persistent adaptive Python CUDA owner | Complete | Exact public/local/subset/canonical outputs; 20 resident Python calls reached 28.221 ms/filter |
+| Phase B closeout | Complete | Reference, native CPU/OpenMP, profiled CUDA, transfer study, and Python workflow validated together |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -51,6 +52,8 @@ The canonical workload contains 47,228,125 outputs with shape `(85, 35, 127, 125
 - The pybind11 interface exposes optimized serial, explicit-thread-count OpenMP, optional one-shot CUDA, and `CudaMedianBuffer` resident workflows with strict finite, four-dimensional, C-contiguous `float64` validation. Direct NumPy buffers made serial `1.097×` and OpenMP-20 `1.658×` faster than their copied binding baselines. Persistent CUDA reduced median effective Python workflow time from 0.835 s/filter for repeated one-shot calls to 0.0436 s/filter across ten resident calls (`19.170×`) in the measured session. All 47,228,125 canonical outputs remained bit-for-bit exact.
 
 The optimized candidates matched the established Python and preceding C++ outputs bit for bit. Raw runs, benchmark boundaries, full scaling data, profiling caveats, and implementation progression are in the [Project 1 technical report](01_4DSTEM_Median_Filter_Acceleration/README.md).
+
+For Phase B adaptive median, the persistent Python CUDA owner matched all 47,228,125 canonical outputs bit for bit. In one controlled session, a new one-call owner took 184.567 ms median; reusing an owner for 20 independent filters with one upload and final download took 28.221 ms/filter (`6.540×` lower effective Python wall time). The resident measurement excludes owner construction; full timing boundaries and variable-laptop caveats are in the technical report.
 
 ## Engineering progression
 
@@ -80,7 +83,9 @@ Python reference
   → Phase B min/max reduction experiment [complete]
   → Phase B median-network experiment [complete; rejected]
   → Phase B CUDA transfer/residency characterization [complete]
-  → Phase B persistent adaptive Python ownership [next]
+  → Phase B persistent adaptive Python ownership [complete]
+  → Phase B validation and closeout [complete]
+  → Project 2 scientific 3D-median contract [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -101,7 +106,7 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
         include/fixed_median_cuda.hpp
                                  CUDA interface, RAII owner, and timing result types
         src/fixed_median_cuda.cu baseline kernel, one-shot path, and resident buffers
-        src/python_bindings.cpp  pybind11 CPU/one-shot/resident-CUDA module
+        src/python_bindings.cpp  pybind11 fixed CPU/CUDA and persistent adaptive CUDA module
         src/cuda_validation.cpp  exact fixture-validation executable
         src/cuda_benchmark.cpp   serial/OpenMP/CUDA benchmark executable
         src/cuda_kernel_benchmark.cpp
@@ -126,6 +131,8 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
     benchmark_data/              instructions for local compatible inputs
     benchmarks/                  Python/4Denoise benchmark harness
     python/validate_bindings.py  public binding smoke and correctness test
+    python/validate_adaptive_cuda_owner.py
+                                 adaptive Python owner correctness and timing
     *.ipynb                      output-cleared scientific reference notebooks
 02_4DSTEM_3D_Median_Filter/      planned
 03_CUDA_KMeans/                  planned

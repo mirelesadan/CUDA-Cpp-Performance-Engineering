@@ -368,7 +368,10 @@ if(PHASE_A_ENABLE_PYTHON)
     endif()
 
     if(PHASE_A_ENABLE_CUDA)
-        target_link_libraries(fourdstem_median PRIVATE phase_a_cuda_baseline)
+        target_link_libraries(fourdstem_median PRIVATE
+            phase_a_cuda_baseline
+            phase_b_adaptive_cuda_baseline
+        )
         target_compile_definitions(fourdstem_median
             PRIVATE PHASE_A_PYTHON_CUDA_ENABLED=1
         )

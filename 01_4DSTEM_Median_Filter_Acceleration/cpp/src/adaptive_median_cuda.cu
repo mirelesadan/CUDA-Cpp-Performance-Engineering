@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -18,6 +20,7 @@ namespace phase_b {
 namespace {
 
 constexpr unsigned int threads_per_block = 256;
+constexpr int cuda_device_index = 0;
 
 void check_cuda(cudaError_t result, const char* operation)
 {
@@ -766,6 +769,113 @@ AdaptiveCudaKernelConfiguration adaptive_median_cuda_kernel_configuration(
         checked_block_count(plane_count),
         checked_block_count(element_count),
     };
+}
+
+struct CudaAdaptiveMedianBuffer::Impl {
+    explicit Impl(const phase_a::Dimensions4D& input_dimensions)
+        : dimensions(input_dimensions),
+          configuration(adaptive_median_cuda_kernel_configuration(input_dimensions)),
+          element_count(checked_element_count(input_dimensions)),
+          plane_count(checked_multiply(input_dimensions.detector_y,
+                                       input_dimensions.detector_x,
+                                       "Adaptive detector-plane count overflow.")),
+          bytes(checked_multiply(element_count, sizeof(double),
+                                 "Adaptive CUDA input byte count overflow."))
+    {
+        check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+        cudaDeviceProp properties{};
+        check_cuda(cudaGetDeviceProperties(&properties, cuda_device_index),
+                   "cudaGetDeviceProperties");
+        if (configuration.plane_minimum_blocks >
+                static_cast<unsigned int>(properties.maxGridSize[0]) ||
+            configuration.adaptive_filter_blocks >
+                static_cast<unsigned int>(properties.maxGridSize[0])) {
+            throw std::overflow_error("Adaptive CUDA grid exceeds the device limit.");
+        }
+
+        device_input = std::make_unique<DeviceBuffer<double>>(element_count);
+        device_output = std::make_unique<DeviceBuffer<double>>(element_count);
+        device_minima = std::make_unique<DeviceBuffer<double>>(plane_count);
+        device_flags = std::make_unique<DeviceBuffer<std::uint8_t>>(element_count);
+    }
+
+    const phase_a::Dimensions4D dimensions;
+    const AdaptiveCudaKernelConfiguration configuration;
+    const std::size_t element_count;
+    const std::size_t plane_count;
+    const std::size_t bytes;
+    std::unique_ptr<DeviceBuffer<double>> device_input;
+    std::unique_ptr<DeviceBuffer<double>> device_output;
+    std::unique_ptr<DeviceBuffer<double>> device_minima;
+    std::unique_ptr<DeviceBuffer<std::uint8_t>> device_flags;
+    mutable std::mutex mutex;
+    bool input_ready = false;
+    bool output_ready = false;
+};
+
+CudaAdaptiveMedianBuffer::CudaAdaptiveMedianBuffer(
+    const phase_a::Dimensions4D& dimensions)
+    : impl_(std::make_unique<Impl>(dimensions))
+{
+}
+
+CudaAdaptiveMedianBuffer::~CudaAdaptiveMedianBuffer() = default;
+
+void CudaAdaptiveMedianBuffer::upload(const double* host_input)
+{
+    if (host_input == nullptr) {
+        throw std::invalid_argument("Adaptive CUDA upload input pointer must not be null.");
+    }
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    impl_->input_ready = false;
+    impl_->output_ready = false;
+    check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+    check_cuda(cudaMemcpy(impl_->device_input->get(), host_input, impl_->bytes,
+                          cudaMemcpyHostToDevice), "adaptive resident upload");
+    impl_->input_ready = true;
+}
+
+void CudaAdaptiveMedianBuffer::filter()
+{
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    if (!impl_->input_ready) {
+        throw std::logic_error("upload() must be called before filter().");
+    }
+    impl_->output_ready = false;
+    check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+    launch_plane_minimum(impl_->device_input->get(), impl_->device_minima->get(),
+                         impl_->dimensions, impl_->configuration.plane_minimum_blocks);
+    launch_adaptive_common_3x3_balanced(
+        impl_->device_input->get(), impl_->device_minima->get(),
+        impl_->device_output->get(), impl_->device_flags->get(), nullptr,
+        impl_->element_count, impl_->dimensions,
+        impl_->configuration.adaptive_filter_blocks);
+    launch_adaptive_fallback(
+        impl_->device_input->get(), impl_->device_minima->get(),
+        impl_->device_output->get(), impl_->device_flags->get(), nullptr,
+        impl_->element_count, impl_->dimensions,
+        impl_->configuration.adaptive_filter_blocks);
+    check_cuda(cudaDeviceSynchronize(), "adaptive resident filter synchronization");
+    impl_->output_ready = true;
+}
+
+void CudaAdaptiveMedianBuffer::download(double* host_output) const
+{
+    if (host_output == nullptr) {
+        throw std::invalid_argument("Adaptive CUDA download output pointer must not be null.");
+    }
+    std::lock_guard<std::mutex> guard(impl_->mutex);
+    if (!impl_->output_ready) {
+        throw std::logic_error("filter() must be called before download().");
+    }
+    check_cuda(cudaSetDevice(cuda_device_index), "cudaSetDevice");
+    check_cuda(cudaMemcpy(host_output, impl_->device_output->get(), impl_->bytes,
+                          cudaMemcpyDeviceToHost), "adaptive resident download");
+}
+
+phase_a::Dimensions4D CudaAdaptiveMedianBuffer::dimensions() const
+{
+    return impl_->dimensions;
 }
 
 AdaptiveCudaResult adaptive_median_s3_smax7_cuda_baseline(
