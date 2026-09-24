@@ -605,7 +605,29 @@ Public 196-value, ignored local 4,096-value, representative 143,360-output, and 
 
 With persistent resources, five warm-ups, seven interleaved timed runs, and CUDA events excluding transfers and plane-minimum work, the final-build monolithic adaptive times were `20.480000, 20.496384, 20.466688, 19.705824, 19.701759, 19.767296, 19.718912` ms (median/min/max `19.767296 / 19.701759 / 20.496384` ms). Split combined times were `16.135168, 16.186369, 15.544288, 15.369216, 15.365120, 15.357952, 15.406080` ms (median/min/max `15.406080 / 15.357952 / 16.186369` ms), a `1.283084×` speedup, `22.062783%` reduction, and `3,065.551 Moutput/s`. Common and fallback medians were `14.055424` and `1.337344` ms. Two earlier complete sequences confirmed `1.295295×` and `1.283172×` speedups with `22.797525%` and `22.068145%` reductions; the lowest-variability sequence had a `0.222640%` split-path CV.
 
-Binary resource metadata changed from 46 registers/thread and a 392-byte stack in the monolithic kernel to 40 registers/thread and no stack/local allocation in the common kernel. A focused eight-pass Nsight check measured 100% theoretical and 96.83% achieved occupancy (46.48 active warps/SM), 84.15% SM throughput, and 21.32% DRAM throughput. Scheduler eligibility did not improve—85.89% of cycles still had no eligible warp—so reduced working storage/local traffic and the removal of unused larger-window instruction work are the supported sources of the wall-time gain, while the precise split between them remains an inference. The two-kernel design is retained; the next experiment is a full focused profile of the retained common kernel before selecting another optimization.
+Binary resource metadata changed from 46 registers/thread and a 392-byte stack in the monolithic kernel to 40 registers/thread and no stack/local allocation in the common kernel. A focused eight-pass Nsight check measured 100% theoretical and 96.83% achieved occupancy (46.48 active warps/SM), 84.15% SM throughput, and 21.32% DRAM throughput. Scheduler eligibility did not improve—85.89% of cycles still had no eligible warp—so reduced working storage/local traffic and the removal of unused larger-window instruction work are the supported sources of the wall-time gain, while the precise split between them remains an inference. The two-kernel design was retained and selected for the full focused profile below.
+
+### Phase B retained common-kernel profile — 2026-09-23
+
+Nsight Compute 2025.2.1 profiled one warmed, non-diagnostic canonical launch of `adaptive_median_common_3x3_kernel` with CUDA 12.9, `sm_89`, MSVC `/O2`, temporary source line information, and 36 replay passes of targeted launch, occupancy, compute, memory, scheduler, warp-state, instruction, and source sections. Only the common kernel was captured; the normal non-profiling Release configuration was restored afterward. Replay changes runtime, so the established unprofiled 14.055424 ms common-kernel and 15.406080 ms combined-path medians—not profiler-run time—remain the performance references.
+
+| Common-kernel metric | Result |
+| --- | ---: |
+| Registers/thread; theoretical/achieved occupancy | 40; 100% / 96.85% (46.49 active warps/SM) |
+| Compiled stack frame; local-memory instructions/sectors | 0 B; none observed |
+| SM / FP64 pipeline / DRAM throughput | 83.65% / 84.17% / 20.15% |
+| L1/TEX / L2 throughput | 11.07% / 15.13% |
+| L1/TEX / L2 hit rate | 7.02% / 91.89% |
+| Useful global load/store bytes per 32-byte sector | 29.72 / 31.97 |
+| Branch efficiency | 99.90% |
+| Scheduler cycles with no eligible warp | 85.89% (0.30 eligible warps/scheduler) |
+| Main stalls, cycles per issued instruction | L1TEX queue throttle 58.56; short scoreboard 19.02; long scoreboard 0.18 |
+
+Binary metadata confirms `STACK:0`, no SASS local loads/stores, and no local-memory sectors or meaningful spill traffic. Nsight's separate 1,024-byte “Stack Size” launch entry describes the configured device stack limit, not this kernel's compiled frame; it is not evidence of renewed spilling. Global loads have about 6% excess sectors, but DRAM throughput was only 20.15%. Math-pipeline throttle (0.26), instruction fetch/dispatch (0.25 combined), and local/global throttle (effectively zero) were small compared with L1TEX queue and short-scoreboard stalls.
+
+Source/instruction attribution is directional and non-additive because the median helper is inlined and a waiting instruction can appear after the operation that caused its dependency. The largest sampled source sites were the neighborhood minimum update (451,551 samples, including 382,543 L1TEX-throttle samples), maximum update (150,233), and inlined median compare/swap helper (355,402, including 259,836 short-scoreboard samples); these site counts must not be summed as exclusive shares. By comparison, flat coordinate decoding had 24,401 samples, detector/scan-plane index arithmetic 780, boundary handling 4,189, and the global gather load 7,636. Stage A had 40,730, Stage B 810, the output store 36,922, and the fallback-flag write 681; compiler motion/inlining limit exclusive attribution. The hottest L1TEX-throttle PC maps to a minimum comparison, but that does not prove the comparison itself fills the queue. Coordinate decoding remains visible in instruction counts without dominating source samples. The inlined median network's many short-scoreboard waits and 84.17% FP64-pipeline utilization make dependency/FP64 compare work a material secondary cost, not a proven standalone instruction-count limit. With 99.90% branch efficiency, boundary, Stage A/B, and flagging do not produce meaningful divergence. The kernel is therefore mixed instruction/dependency and L1TEX-queue limited, not primarily DRAM-bandwidth, occupancy, spill, or branch-divergence limited.
+
+Compared with the prior 46-register, 392-byte-stack monolithic adaptive kernel (65.75% achieved occupancy), local-memory work and its long-scoreboard/local-global-throttle stalls have disappeared. The old profile showed 84.91% no-eligible-warp cycles versus 85.89% now: higher occupancy did not cure poor scheduler eligibility. Old/new L1 hit rates were 65.56%/7.02%, L2 hits 97.81%/91.89%, and L1TEX/L2 throughput 74.70%/92.97% versus 11.07%/15.13%; these differences largely reflect removal of stack/local traffic and replay-sensitive measurements, not a proven worsening of the gather. Ranked next candidates: (1) balance the nine-value min/max reduction while leaving gathering and selection untouched, to test the largest sampled dependency site with moderate implementation risk; (2) consider a lower-dependency median-of-nine network, targeting compare/swap waits but with greater correctness risk; (3) adjust gathering/address coalescing, where modest sector excess and low DRAM use imply a lower likely payoff. The next isolated experiment is candidate 1 only; this profiling checkpoint changed no kernel code.
 
 ## Data
 
@@ -657,7 +679,7 @@ For authorized local scientific work, place the experimental source outside vers
 
 Phase A completed the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
 
-Phase B is the main progression: the exact adaptive contract is reproduced in clear C++, its native baseline is profiled, and fixed stack storage plus specialized nine-value selection have addressed the two largest measured costs without changing numerical behavior. Direct padded-row gathering is next; OpenMP and CUDA remain later stages.
+Phase B reproduces the exact adaptive contract in clear C++, then progresses through profiled serial optimizations, portable OpenMP, an exact CUDA baseline, and a retained common/fallback CUDA split. Profiling of that split path is complete; a narrow common-kernel min/max experiment is next.
 
 ## Status
 
@@ -695,8 +717,9 @@ Completed reference and organization work:
 - correctness-first Phase B CUDA with separate global-minimum/adaptive kernels, exact public/local/subset/canonical and diagnostic equivalence, and a 19.757919 ms steady adaptive-kernel median.
 - focused Nsight Compute profiling classifying the adaptive kernel as local-memory/cache-latency plus FP64-instruction limited and selecting common-path storage separation next.
 - retained split adaptive CUDA path with exact output/counter equivalence, no common-kernel stack allocation, and a repeatable 22–23% combined-kernel reduction.
+- focused profiling of the retained common CUDA kernel, identifying L1TEX-queue and short-scoreboard stalls after elimination of monolithic local-memory traffic.
 
-Phase A status: **complete**. Phase B split adaptive CUDA path status: **complete and retained**. Next: profile the retained common kernel before selecting another CUDA optimization.
+Phase A status: **complete**. Phase B split adaptive CUDA path and common-kernel profiling: **complete**. Next: test an isolated nine-value min/max reduction on the retained common kernel.
 
 ## Remaining TBDs
 
