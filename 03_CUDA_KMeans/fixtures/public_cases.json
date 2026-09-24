@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "reference_contract": "lloyd-fp32-assignment-fp64-update-v1",
+  "cases": [
+    {
+      "name": "separated_signed_and_limit",
+      "purpose": "separated clusters; positive/negative/zero coordinates; values at +/-1024; one-update convergence",
+      "k": 2,
+      "max_updates": 100,
+      "initial_rows": [4, 12],
+      "points": [
+        [-1024, 0], [-1023, -1], [-1022, 0], [-1021, 1],
+        [-1020, 0], [-1019, -1], [-1018, 0], [-1017, 1],
+        [1017, 0], [1018, -1], [1019, 0], [1020, 1],
+        [1021, 0], [1022, -1], [1023, 0], [1024, 1]
+      ],
+      "expected_labels": [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+      "expected_centroids": [[-1020.5, 0], [1020.5, 0]],
+      "expected_update_count": 1,
+      "expected_converged": true,
+      "expected_inertia": 92.0
+    },
+    {
+      "name": "exact_tie_duplicate_seeds_empty_cluster",
+      "purpose": "duplicate points/seeds; 6 ties among initial centers and selects 0; empty cluster 1 retains center 3",
+      "k": 3,
+      "max_updates": 100,
+      "initial_rows": [2, 8, 13],
+      "points": [
+        [0], [3], [3], [3], [3], [3], [6], [3],
+        [3], [9], [9], [9], [9], [9], [9], [9]
+      ],
+      "expected_labels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2],
+      "expected_centroids": [[3], [3], [9]],
+      "expected_update_count": 1,
+      "expected_converged": true,
+      "expected_inertia": 18.0
+    },
+    {
+      "name": "singleton_cluster_zero_inertia",
+      "purpose": "one cluster contains only the sample at row 13; all centroids and distances are exact",
+      "k": 3,
+      "max_updates": 100,
+      "initial_rows": [2, 8, 13],
+      "points": [
+        [0], [0], [0], [0], [0], [0], [0], [0],
+        [10], [10], [10], [10], [10], [100], [10], [10]
+      ],
+      "expected_labels": [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 1, 1],
+      "expected_centroids": [[0], [10], [100]],
+      "expected_update_count": 1,
+      "expected_converged": true,
+      "expected_inertia": 0.0
+    },
+    {
+      "name": "three_updates",
+      "purpose": "centroid movement and convergence after more than one update",
+      "k": 2,
+      "max_updates": 100,
+      "initial_rows": [4, 12],
+      "points": [
+        [0], [1], [2], [3], [4], [5], [6], [7],
+        [8], [9], [10], [11], [12], [30], [31], [32]
+      ],
+      "expected_labels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
+      "expected_centroids": [[6], [31]],
+      "expected_update_count": 3,
+      "expected_converged": true,
+      "expected_inertia": 184.0
+    },
+    {
+      "name": "update_cap_without_hidden_update",
+      "purpose": "same points as three_updates, capped at one update; final labels need not match centroid means",
+      "k": 2,
+      "max_updates": 1,
+      "initial_rows": [4, 12],
+      "points": [
+        [0], [1], [2], [3], [4], [5], [6], [7],
+        [8], [9], [10], [11], [12], [30], [31], [32]
+      ],
+      "expected_labels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
+      "expected_centroids": [[4], [19.285715103149414]],
+      "expected_update_count": 1,
+      "expected_converged": false,
+      "expected_inertia": 636.7550564980047
+    },
+    {
+      "name": "fp32_distance_rounding",
+      "purpose": "middle point ties at 0.25 in ordered FP32 accumulation, while FP64 would assign cluster 1",
+      "k": 2,
+      "max_updates": 100,
+      "initial_rows": [4, 12],
+      "points": [
+        [0, 0.0001220703125], [0, 0.0001220703125],
+        [0, 0.0001220703125], [0, 0.0001220703125],
+        [0, 0.0001220703125], [0, 0.0001220703125],
+        [0, 0.0001220703125], [0.5, 0],
+        [1, 0], [1, 0], [1, 0], [1, 0],
+        [1, 0], [1, 0], [1, 0], [1, 0]
+      ],
+      "expected_labels": [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+      "expected_centroids": [[0.0625, 0.0001068115234375], [1, 0]],
+      "expected_update_count": 1,
+      "expected_converged": true,
+      "expected_inertia": 0.21875001303851604
+    }
+  ]
+}
