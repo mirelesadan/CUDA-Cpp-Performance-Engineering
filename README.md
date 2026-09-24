@@ -2,7 +2,7 @@
 
 This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, three retained serial optimizations, portable OpenMP, and a profiled CUDA implementation with a retained split common path.
 
-The next technical milestone is an isolated Phase B CUDA experiment on the retained split kernel's nine-value min/max reduction. Projects 2–4 remain planned work.
+The retained Phase B split CUDA path now includes a measured balanced nine-value min/max candidate. The next technical milestone is an isolated median-network dependency experiment. Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -31,7 +31,8 @@ The next technical milestone is an isolated Phase B CUDA experiment on the retai
 | Phase B adaptive CUDA profiling | Complete | Nsight Compute found a local-memory/cache-latency plus FP64-instruction bottleneck, not DRAM or divergence |
 | Phase B split common-path CUDA | Complete | Right-sized the 99.85% common `3 × 3` path; combined adaptive time fell repeatably by 22–23% with exact semantics |
 | Phase B split-kernel profiling | Complete | Nsight Compute found L1TEX-queue and short-scoreboard stalls in the common kernel despite high occupancy and no compiled local-memory traffic |
-| Phase B min/max reduction experiment | **Next** | Test one dependency-reduction change while retaining the split path and exact adaptive semantics |
+| Phase B min/max reduction experiment | Complete | Exact balanced reduction retained after repeatable ~7–9% common-kernel gains despite lower occupancy |
+| Phase B median-network experiment | **Next** | Test the remaining compare/swap dependency chain independently |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -74,7 +75,8 @@ Python reference
   → Phase B adaptive CUDA profiling [complete]
   → Phase B split common-path CUDA [complete]
   → Phase B split-kernel profiling [complete]
-  → Phase B min/max reduction experiment [next]
+  → Phase B min/max reduction experiment [complete]
+  → Phase B median-network experiment [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.

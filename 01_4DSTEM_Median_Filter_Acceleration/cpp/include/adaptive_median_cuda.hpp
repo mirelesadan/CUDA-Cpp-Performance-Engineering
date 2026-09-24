@@ -42,6 +42,13 @@ struct AdaptiveCudaSplitKernelBenchmarkResult {
     std::vector<double> split_combined_milliseconds;
 };
 
+struct AdaptiveCudaBalancedCommonBenchmarkResult {
+    std::vector<double> baseline_output;
+    std::vector<double> candidate_output;
+    std::vector<double> baseline_common_milliseconds;
+    std::vector<double> candidate_common_milliseconds;
+};
+
 // Correctness-first one-shot CUDA baseline. Device allocation is intentionally
 // internal; total_gpu_path spans pageable H2D, both kernels, and pageable D2H,
 // while native_wall also includes validation, allocation, events, and cleanup.
@@ -52,6 +59,12 @@ AdaptiveCudaResult adaptive_median_s3_smax7_cuda_baseline(
 // One-shot form of the retained split candidate. Its adaptive_filter_kernel
 // timing spans the common and fallback launches together.
 AdaptiveCudaResult adaptive_median_s3_smax7_cuda_split(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions);
+
+// Retained split path with a balanced nine-value min/max reduction in only
+// the common kernel; transfer and fallback behavior match the control.
+AdaptiveCudaResult adaptive_median_s3_smax7_cuda_split_balanced(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions);
 
@@ -68,6 +81,11 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_cuda_split_diagnostics(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions);
 
+// Balanced candidate diagnostics use the same outcome accounting as the control.
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_cuda_split_balanced_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions);
+
 // Benchmark-only stable kernel sequence. Buffers and events are reused within
 // this call; this does not expose persistent device ownership to applications.
 AdaptiveCudaKernelBenchmarkResult benchmark_adaptive_median_s3_smax7_cuda_kernels(
@@ -78,6 +96,13 @@ AdaptiveCudaKernelBenchmarkResult benchmark_adaptive_median_s3_smax7_cuda_kernel
 
 AdaptiveCudaSplitKernelBenchmarkResult
 benchmark_adaptive_median_s3_smax7_cuda_split_kernels(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    std::size_t warmup_launch_count,
+    std::size_t timed_launch_count);
+
+AdaptiveCudaBalancedCommonBenchmarkResult
+benchmark_adaptive_median_s3_smax7_cuda_balanced_common(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions,
     std::size_t warmup_launch_count,

@@ -178,6 +178,8 @@ int main(int argc, char* argv[])
         const auto dimensions = dimensions_from(canonical.array.shape);
         phase_a::Dimensions4D subset_dimensions{};
         const auto subset = extract_subset(canonical.array.data, dimensions, subset_dimensions);
+        auto original_canonical = canonical.array.data;
+        const auto original_subset = subset;
 
         const auto subset_cpu =
             phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather_diagnostics(
@@ -186,6 +188,9 @@ int main(int argc, char* argv[])
             subset, subset_dimensions);
         const auto subset_split = phase_b::adaptive_median_s3_smax7_cuda_split_diagnostics(
             subset, subset_dimensions);
+        const auto subset_balanced =
+            phase_b::adaptive_median_s3_smax7_cuda_split_balanced_diagnostics(
+                subset, subset_dimensions);
         auto canonical_cpu =
             phase_b::detail::adaptive_median_s3_smax7_direct_3x3_gather_diagnostics(
                 canonical.array.data, dimensions);
@@ -193,6 +198,9 @@ int main(int argc, char* argv[])
             canonical.array.data, dimensions);
         auto canonical_split = phase_b::adaptive_median_s3_smax7_cuda_split_diagnostics(
             canonical.array.data, dimensions);
+        auto canonical_balanced =
+            phase_b::adaptive_median_s3_smax7_cuda_split_balanced_diagnostics(
+                canonical.array.data, dimensions);
         const std::size_t subset_output_mismatches = mismatches(subset_cpu.output, subset_cuda.output);
         const std::size_t subset_split_output_mismatches = mismatches(
             subset_cpu.output, subset_split.output);
@@ -200,6 +208,12 @@ int main(int argc, char* argv[])
             subset_cpu.statistics, subset_cuda.statistics);
         const std::size_t subset_split_counter_mismatches = statistic_mismatches(
             subset_cpu.statistics, subset_split.statistics);
+        const std::size_t subset_balanced_output_mismatches = mismatches(
+            subset_cpu.output, subset_balanced.output);
+        const std::size_t subset_balanced_control_mismatches = mismatches(
+            subset_split.output, subset_balanced.output);
+        const std::size_t subset_balanced_counter_mismatches = statistic_mismatches(
+            subset_cpu.statistics, subset_balanced.statistics);
         const std::size_t canonical_output_mismatches = mismatches(
             canonical_cpu.output, canonical_cuda.output);
         const std::size_t canonical_split_output_mismatches = mismatches(
@@ -210,17 +224,35 @@ int main(int argc, char* argv[])
             canonical_cpu.statistics, canonical_cuda.statistics);
         const std::size_t canonical_split_counter_mismatches = statistic_mismatches(
             canonical_cpu.statistics, canonical_split.statistics);
+        const std::size_t canonical_balanced_output_mismatches = mismatches(
+            canonical_cpu.output, canonical_balanced.output);
+        const std::size_t canonical_balanced_control_mismatches = mismatches(
+            canonical_split.output, canonical_balanced.output);
+        const std::size_t canonical_balanced_counter_mismatches = statistic_mismatches(
+            canonical_cpu.statistics, canonical_balanced.statistics);
+        const std::size_t canonical_input_changes = mismatches(
+            original_canonical, canonical.array.data);
+        const std::size_t subset_input_changes = mismatches(original_subset, subset);
         if (subset_output_mismatches != 0 || subset_split_output_mismatches != 0 ||
             subset_counter_mismatches != 0 || subset_split_counter_mismatches != 0 ||
+            subset_balanced_output_mismatches != 0 ||
+            subset_balanced_control_mismatches != 0 ||
+            subset_balanced_counter_mismatches != 0 ||
             canonical_output_mismatches != 0 || canonical_split_output_mismatches != 0 ||
             canonical_split_baseline_mismatches != 0 || canonical_counter_mismatches != 0 ||
-            canonical_split_counter_mismatches != 0) {
+            canonical_split_counter_mismatches != 0 ||
+            canonical_balanced_output_mismatches != 0 ||
+            canonical_balanced_control_mismatches != 0 ||
+            canonical_balanced_counter_mismatches != 0 ||
+            canonical_input_changes != 0 || subset_input_changes != 0) {
             throw std::runtime_error("CUDA correctness or diagnostic counters differ from optimized CPU.");
         }
 
+        std::vector<double>().swap(original_canonical);
         std::vector<double>().swap(canonical_cuda.output);
         std::vector<double>().swap(canonical_split.output);
-        const auto split_sequence =
+        std::vector<double>().swap(canonical_balanced.output);
+        auto split_sequence =
             phase_b::benchmark_adaptive_median_s3_smax7_cuda_split_kernels(
                 canonical.array.data, dimensions, 5, 7);
         const std::size_t timed_monolithic_mismatches = mismatches(
@@ -233,6 +265,23 @@ int main(int argc, char* argv[])
             timed_split_baseline_mismatches != 0) {
             throw std::runtime_error("Timed monolithic or split CUDA output differs from optimized CPU.");
         }
+        std::vector<double>().swap(split_sequence.monolithic_output);
+        std::vector<double>().swap(split_sequence.split_output);
+
+        const auto balanced_sequence =
+            phase_b::benchmark_adaptive_median_s3_smax7_cuda_balanced_common(
+                canonical.array.data, dimensions, 5, 7);
+        const std::size_t timed_balanced_baseline_mismatches = mismatches(
+            balanced_sequence.baseline_output, canonical_cpu.output);
+        const std::size_t timed_balanced_candidate_mismatches = mismatches(
+            balanced_sequence.candidate_output, canonical_cpu.output);
+        const std::size_t timed_balanced_between_mismatches = mismatches(
+            balanced_sequence.baseline_output, balanced_sequence.candidate_output);
+        if (timed_balanced_baseline_mismatches != 0 ||
+            timed_balanced_candidate_mismatches != 0 ||
+            timed_balanced_between_mismatches != 0) {
+            throw std::runtime_error("Timed balanced common outputs differ from optimized CPU.");
+        }
 
         const auto configuration = phase_b::adaptive_median_cuda_kernel_configuration(dimensions);
         const Summary monolithic_summary = summarize(
@@ -240,6 +289,10 @@ int main(int argc, char* argv[])
         const Summary common_summary = summarize(split_sequence.common_3x3_milliseconds);
         const Summary fallback_summary = summarize(split_sequence.fallback_milliseconds);
         const Summary split_summary = summarize(split_sequence.split_combined_milliseconds);
+        const Summary balanced_baseline_summary = summarize(
+            balanced_sequence.baseline_common_milliseconds);
+        const Summary balanced_candidate_summary = summarize(
+            balanced_sequence.candidate_common_milliseconds);
         const auto& statistics = canonical_cpu.statistics;
         const double total_outputs = static_cast<double>(statistics.total_outputs);
         const double speedup = monolithic_summary.median / split_summary.median;
@@ -256,15 +309,29 @@ int main(int argc, char* argv[])
                   << "Subset split output/counter mismatches: "
                   << subset_split_output_mismatches << " / "
                   << subset_split_counter_mismatches << '\n'
+                  << "Subset balanced output/control/counter mismatches: "
+                  << subset_balanced_output_mismatches << " / "
+                  << subset_balanced_control_mismatches << " / "
+                  << subset_balanced_counter_mismatches << '\n'
                   << "Canonical output/counter mismatches: " << canonical_output_mismatches << " / "
                   << canonical_counter_mismatches << '\n'
                   << "Canonical split output/baseline/counter mismatches: "
                   << canonical_split_output_mismatches << " / "
                   << canonical_split_baseline_mismatches << " / "
                   << canonical_split_counter_mismatches << '\n'
+                  << "Canonical balanced output/control/counter mismatches: "
+                  << canonical_balanced_output_mismatches << " / "
+                  << canonical_balanced_control_mismatches << " / "
+                  << canonical_balanced_counter_mismatches << '\n'
+                  << "Subset/canonical input bit changes: " << subset_input_changes << " / "
+                  << canonical_input_changes << '\n'
                   << "Timed monolithic/split/between-output mismatches: "
                   << timed_monolithic_mismatches << " / " << timed_split_mismatches << " / "
                   << timed_split_baseline_mismatches << '\n'
+                  << "Timed balanced baseline/candidate/between-output mismatches: "
+                  << timed_balanced_baseline_mismatches << " / "
+                  << timed_balanced_candidate_mismatches << " / "
+                  << timed_balanced_between_mismatches << '\n'
                   << "Threads/block, plane-min blocks, adaptive blocks: "
                   << configuration.threads_per_block << " / "
                   << configuration.plane_minimum_blocks << " / "
@@ -280,6 +347,10 @@ int main(int argc, char* argv[])
         print_series("Split common 3x3", split_sequence.common_3x3_milliseconds);
         print_series("Split fallback 5x5/7x7", split_sequence.fallback_milliseconds);
         print_series("Split combined adaptive", split_sequence.split_combined_milliseconds);
+        print_series("Balanced experiment control common 3x3",
+                     balanced_sequence.baseline_common_milliseconds);
+        print_series("Balanced experiment candidate common 3x3",
+                     balanced_sequence.candidate_common_milliseconds);
         std::cout << "Separate flag/reset/management kernel time (ms): 0.000000\n"
                   << "Split speedup: " << speedup << '\n'
                   << "Split runtime reduction (%): " << runtime_reduction << '\n'
@@ -288,7 +359,17 @@ int main(int argc, char* argv[])
                   << "Monolithic throughput (Moutput/s): "
                   << canonical.element_count / (monolithic_summary.median * 1000.0) << '\n'
                   << "Common/fallback medians (ms): " << common_summary.median << " / "
-                  << fallback_summary.median << '\n';
+                  << fallback_summary.median << '\n'
+                  << "Balanced common speedup: "
+                  << balanced_baseline_summary.median / balanced_candidate_summary.median << '\n'
+                  << "Balanced common runtime reduction (%): "
+                  << 100.0 * (1.0 - balanced_candidate_summary.median /
+                                      balanced_baseline_summary.median) << '\n'
+                  << "Balanced control/candidate throughput (Moutput/s): "
+                  << canonical.element_count / (balanced_baseline_summary.median * 1000.0)
+                  << " / "
+                  << canonical.element_count / (balanced_candidate_summary.median * 1000.0)
+                  << '\n';
         return 0;
     }
     catch (const std::exception& error) {

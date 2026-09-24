@@ -369,6 +369,105 @@ __global__ void adaptive_median_common_3x3_kernel(
     }
 }
 
+// For finite inputs, retaining the first operand on equality also preserves
+// the baseline reduction's signed-zero tie behavior.
+__device__ __forceinline__ double minimum_first_on_tie(double first, double second)
+{
+    return second < first ? second : first;
+}
+
+__device__ __forceinline__ double maximum_first_on_tie(double first, double second)
+{
+    return first < second ? second : first;
+}
+
+__global__ void adaptive_median_common_3x3_balanced_minmax_kernel(
+    const double* input,
+    const double* plane_minima,
+    double* output,
+    std::uint8_t* fallback_flags,
+    std::uint8_t* outcomes,
+    std::size_t element_count,
+    std::size_t scan_y_size,
+    std::size_t scan_x_size,
+    std::size_t detector_y_size,
+    std::size_t detector_x_size)
+{
+    const std::size_t output_index =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (output_index >= element_count) {
+        return;
+    }
+
+    const std::size_t plane_count = detector_y_size * detector_x_size;
+    std::size_t remaining = output_index;
+    const std::size_t detector_x = remaining % detector_x_size;
+    remaining /= detector_x_size;
+    const std::size_t detector_y = remaining % detector_y_size;
+    remaining /= detector_y_size;
+    const std::size_t scan_x = remaining % scan_x_size;
+    const std::size_t scan_y = remaining / scan_x_size;
+    const std::size_t plane_index = detector_y * detector_x_size + detector_x;
+    const double plane_minimum = plane_minima[plane_index];
+    const double center = input[output_index];
+
+    double window[9];
+    int count = 0;
+    for (int offset_y = -1; offset_y <= 1; ++offset_y) {
+        const long long neighbor_y = static_cast<long long>(scan_y) + offset_y;
+        for (int offset_x = -1; offset_x <= 1; ++offset_x) {
+            const long long neighbor_x = static_cast<long long>(scan_x) + offset_x;
+            double value = plane_minimum;
+            if (neighbor_y >= 0 && neighbor_y < static_cast<long long>(scan_y_size) &&
+                neighbor_x >= 0 && neighbor_x < static_cast<long long>(scan_x_size)) {
+                const std::size_t neighbor_scan_position =
+                    static_cast<std::size_t>(neighbor_y) * scan_x_size +
+                    static_cast<std::size_t>(neighbor_x);
+                value = input[neighbor_scan_position * plane_count + plane_index];
+            }
+            window[count++] = value;
+        }
+    }
+
+    // Four independent pairs, then a balanced tree, then the ninth value.
+    // Each tie selects the earlier window position, as in the serial update.
+    const double minimum_01 = minimum_first_on_tie(window[0], window[1]);
+    const double minimum_23 = minimum_first_on_tie(window[2], window[3]);
+    const double minimum_45 = minimum_first_on_tie(window[4], window[5]);
+    const double minimum_67 = minimum_first_on_tie(window[6], window[7]);
+    const double minimum_03 = minimum_first_on_tie(minimum_01, minimum_23);
+    const double minimum_47 = minimum_first_on_tie(minimum_45, minimum_67);
+    const double local_minimum = minimum_first_on_tie(
+        minimum_first_on_tie(minimum_03, minimum_47), window[8]);
+
+    const double maximum_01 = maximum_first_on_tie(window[0], window[1]);
+    const double maximum_23 = maximum_first_on_tie(window[2], window[3]);
+    const double maximum_45 = maximum_first_on_tie(window[4], window[5]);
+    const double maximum_67 = maximum_first_on_tie(window[6], window[7]);
+    const double maximum_03 = maximum_first_on_tie(maximum_01, maximum_23);
+    const double maximum_47 = maximum_first_on_tie(maximum_45, maximum_67);
+    const double local_maximum = maximum_first_on_tie(
+        maximum_first_on_tie(maximum_03, maximum_47), window[8]);
+
+    const double local_median = median_of_nine(window);
+    if (local_minimum < local_median && local_median < local_maximum) {
+        const bool retain_center = local_minimum < center && center < local_maximum;
+        output[output_index] = retain_center ? center : local_median;
+        fallback_flags[output_index] = 0;
+        if (outcomes != nullptr) {
+            outcomes[output_index] = static_cast<std::uint8_t>(
+                retain_center ? finish_3_retain : finish_3_replace);
+        }
+        return;
+    }
+
+    output[output_index] = center;
+    fallback_flags[output_index] = 1;
+    if (outcomes != nullptr) {
+        outcomes[output_index] = static_cast<std::uint8_t>(maximum_fallback);
+    }
+}
+
 __global__ void adaptive_median_fallback_5x5_7x7_kernel(
     const double* input,
     const double* plane_minima,
@@ -508,6 +607,30 @@ void launch_adaptive_common_3x3(
         dimensions.detector_y,
         dimensions.detector_x);
     check_cuda(cudaGetLastError(), "adaptive_median_common_3x3_kernel launch");
+}
+
+void launch_adaptive_common_3x3_balanced(
+    const double* input,
+    const double* plane_minima,
+    double* output,
+    std::uint8_t* fallback_flags,
+    std::uint8_t* outcomes,
+    std::size_t element_count,
+    const phase_a::Dimensions4D& dimensions,
+    unsigned int blocks)
+{
+    adaptive_median_common_3x3_balanced_minmax_kernel<<<blocks, threads_per_block>>>(
+        input,
+        plane_minima,
+        output,
+        fallback_flags,
+        outcomes,
+        element_count,
+        dimensions.scan_y,
+        dimensions.scan_x,
+        dimensions.detector_y,
+        dimensions.detector_x);
+    check_cuda(cudaGetLastError(), "adaptive_median_common_3x3_balanced_minmax_kernel launch");
 }
 
 void launch_adaptive_fallback(
@@ -723,6 +846,69 @@ AdaptiveCudaResult adaptive_median_s3_smax7_cuda_split(
     return result;
 }
 
+AdaptiveCudaResult adaptive_median_s3_smax7_cuda_split_balanced(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    const auto wall_start = std::chrono::steady_clock::now();
+    validate_input(input, dimensions);
+    const AdaptiveCudaKernelConfiguration configuration =
+        adaptive_median_cuda_kernel_configuration(dimensions);
+    const std::size_t element_count = input.size();
+    const std::size_t plane_count = dimensions.detector_y * dimensions.detector_x;
+    const std::size_t bytes = element_count * sizeof(double);
+
+    AdaptiveCudaResult result;
+    result.output.resize(element_count);
+    {
+        DeviceBuffer<double> device_input(element_count);
+        DeviceBuffer<double> device_output(element_count);
+        DeviceBuffer<double> device_plane_minima(plane_count);
+        DeviceBuffer<std::uint8_t> device_fallback_flags(element_count);
+        Event total_start;
+        Event h2d_stop;
+        Event minimum_stop;
+        Event adaptive_stop;
+        Event total_stop;
+
+        record(total_start, "cudaEventRecord before balanced adaptive H2D");
+        check_cuda(cudaMemcpy(device_input.get(), input.data(), bytes, cudaMemcpyHostToDevice),
+                   "balanced adaptive pageable cudaMemcpy H2D");
+        record(h2d_stop, "cudaEventRecord after balanced adaptive H2D");
+
+        launch_plane_minimum(
+            device_input.get(), device_plane_minima.get(), dimensions,
+            configuration.plane_minimum_blocks);
+        record(minimum_stop, "cudaEventRecord after balanced plane-minimum kernel");
+
+        launch_adaptive_common_3x3_balanced(
+            device_input.get(), device_plane_minima.get(), device_output.get(),
+            device_fallback_flags.get(), nullptr, element_count, dimensions,
+            configuration.adaptive_filter_blocks);
+        launch_adaptive_fallback(
+            device_input.get(), device_plane_minima.get(), device_output.get(),
+            device_fallback_flags.get(), nullptr, element_count, dimensions,
+            configuration.adaptive_filter_blocks);
+        record(adaptive_stop, "cudaEventRecord after balanced adaptive kernels");
+
+        check_cuda(cudaMemcpy(result.output.data(), device_output.get(), bytes, cudaMemcpyDeviceToHost),
+                   "balanced adaptive pageable cudaMemcpy D2H");
+        record(total_stop, "cudaEventRecord after balanced adaptive D2H");
+        check_cuda(cudaEventSynchronize(total_stop.get()),
+                   "cudaEventSynchronize balanced adaptive one-shot path");
+
+        result.timing.host_to_device = elapsed(total_start, h2d_stop);
+        result.timing.plane_minimum_kernel = elapsed(h2d_stop, minimum_stop);
+        result.timing.adaptive_filter_kernel = elapsed(minimum_stop, adaptive_stop);
+        result.timing.device_to_host = elapsed(adaptive_stop, total_stop);
+        result.timing.total_gpu_path = elapsed(total_start, total_stop);
+    }
+    const auto wall_stop = std::chrono::steady_clock::now();
+    result.timing.native_wall =
+        std::chrono::duration<double, std::milli>(wall_stop - wall_start).count();
+    return result;
+}
+
 AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_cuda_baseline_diagnostics(
     const std::vector<double>& input,
     const phase_a::Dimensions4D& dimensions)
@@ -796,6 +982,48 @@ AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_cuda_split_diagnostics(
     check_cuda(cudaMemcpy(outcomes.data(), device_outcomes.get(), outcomes.size(),
                           cudaMemcpyDeviceToHost),
                "split diagnostic adaptive outcome cudaMemcpy D2H");
+    result.statistics = aggregate_outcomes(outcomes);
+    return result;
+}
+
+AdaptiveMedianDiagnosticResult adaptive_median_s3_smax7_cuda_split_balanced_diagnostics(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions)
+{
+    validate_input(input, dimensions);
+    const AdaptiveCudaKernelConfiguration configuration =
+        adaptive_median_cuda_kernel_configuration(dimensions);
+    const std::size_t element_count = input.size();
+    const std::size_t plane_count = dimensions.detector_y * dimensions.detector_x;
+    const std::size_t bytes = element_count * sizeof(double);
+
+    AdaptiveMedianDiagnosticResult result;
+    result.output.resize(element_count);
+    std::vector<std::uint8_t> outcomes(element_count);
+    DeviceBuffer<double> device_input(element_count);
+    DeviceBuffer<double> device_output(element_count);
+    DeviceBuffer<double> device_plane_minima(plane_count);
+    DeviceBuffer<std::uint8_t> device_fallback_flags(element_count);
+    DeviceBuffer<std::uint8_t> device_outcomes(element_count);
+
+    check_cuda(cudaMemcpy(device_input.get(), input.data(), bytes, cudaMemcpyHostToDevice),
+               "balanced diagnostic adaptive cudaMemcpy H2D");
+    launch_plane_minimum(
+        device_input.get(), device_plane_minima.get(), dimensions,
+        configuration.plane_minimum_blocks);
+    launch_adaptive_common_3x3_balanced(
+        device_input.get(), device_plane_minima.get(), device_output.get(),
+        device_fallback_flags.get(), device_outcomes.get(), element_count, dimensions,
+        configuration.adaptive_filter_blocks);
+    launch_adaptive_fallback(
+        device_input.get(), device_plane_minima.get(), device_output.get(),
+        device_fallback_flags.get(), device_outcomes.get(), element_count, dimensions,
+        configuration.adaptive_filter_blocks);
+    check_cuda(cudaMemcpy(result.output.data(), device_output.get(), bytes, cudaMemcpyDeviceToHost),
+               "balanced diagnostic adaptive output cudaMemcpy D2H");
+    check_cuda(cudaMemcpy(outcomes.data(), device_outcomes.get(), outcomes.size(),
+                          cudaMemcpyDeviceToHost),
+               "balanced diagnostic adaptive outcome cudaMemcpy D2H");
     result.statistics = aggregate_outcomes(outcomes);
     return result;
 }
@@ -949,6 +1177,107 @@ benchmark_adaptive_median_s3_smax7_cuda_split_kernels(
     check_cuda(cudaMemcpy(result.split_output.data(), device_split_output.get(), bytes,
                           cudaMemcpyDeviceToHost),
                "split benchmark split output cudaMemcpy D2H");
+    return result;
+}
+
+AdaptiveCudaBalancedCommonBenchmarkResult
+benchmark_adaptive_median_s3_smax7_cuda_balanced_common(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    std::size_t warmup_launch_count,
+    std::size_t timed_launch_count)
+{
+    validate_input(input, dimensions);
+    if (timed_launch_count == 0) {
+        throw std::invalid_argument("Balanced common-kernel benchmark requires timed launches.");
+    }
+    const AdaptiveCudaKernelConfiguration configuration =
+        adaptive_median_cuda_kernel_configuration(dimensions);
+    const std::size_t element_count = input.size();
+    const std::size_t plane_count = dimensions.detector_y * dimensions.detector_x;
+    const std::size_t bytes = element_count * sizeof(double);
+
+    AdaptiveCudaBalancedCommonBenchmarkResult result;
+    result.baseline_output.resize(element_count);
+    result.candidate_output.resize(element_count);
+    result.baseline_common_milliseconds.reserve(timed_launch_count);
+    result.candidate_common_milliseconds.reserve(timed_launch_count);
+    DeviceBuffer<double> device_input(element_count);
+    DeviceBuffer<double> device_baseline_output(element_count);
+    DeviceBuffer<double> device_candidate_output(element_count);
+    DeviceBuffer<double> device_plane_minima(plane_count);
+    DeviceBuffer<std::uint8_t> device_baseline_flags(element_count);
+    DeviceBuffer<std::uint8_t> device_candidate_flags(element_count);
+    Event start;
+    Event stop;
+
+    check_cuda(cudaMemcpy(device_input.get(), input.data(), bytes, cudaMemcpyHostToDevice),
+               "balanced benchmark adaptive cudaMemcpy H2D");
+    launch_plane_minimum(
+        device_input.get(), device_plane_minima.get(), dimensions,
+        configuration.plane_minimum_blocks);
+    check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize after balanced plane minimum");
+
+    const auto launch_common = [&](bool candidate) {
+        if (candidate) {
+            launch_adaptive_common_3x3_balanced(
+                device_input.get(), device_plane_minima.get(), device_candidate_output.get(),
+                device_candidate_flags.get(), nullptr, element_count, dimensions,
+                configuration.adaptive_filter_blocks);
+        }
+        else {
+            launch_adaptive_common_3x3(
+                device_input.get(), device_plane_minima.get(), device_baseline_output.get(),
+                device_baseline_flags.get(), nullptr, element_count, dimensions,
+                configuration.adaptive_filter_blocks);
+        }
+    };
+
+    for (std::size_t warmup = 0; warmup < warmup_launch_count; ++warmup) {
+        launch_common(false);
+        launch_common(true);
+    }
+    check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize after balanced common warm-up");
+
+    const auto time_common = [&](bool candidate) {
+        record(start, "cudaEventRecord before timed common kernel");
+        launch_common(candidate);
+        record(stop, "cudaEventRecord after timed common kernel");
+        check_cuda(cudaEventSynchronize(stop.get()), "cudaEventSynchronize timed common kernel");
+        const double milliseconds = elapsed(start, stop);
+        if (candidate) {
+            result.candidate_common_milliseconds.push_back(milliseconds);
+        }
+        else {
+            result.baseline_common_milliseconds.push_back(milliseconds);
+        }
+    };
+    for (std::size_t run = 0; run < timed_launch_count; ++run) {
+        if (run % 2 == 0) {
+            time_common(false);
+            time_common(true);
+        }
+        else {
+            time_common(true);
+            time_common(false);
+        }
+    }
+
+    // Finish each path outside timing so copied outputs are full adaptive results.
+    launch_adaptive_fallback(
+        device_input.get(), device_plane_minima.get(), device_baseline_output.get(),
+        device_baseline_flags.get(), nullptr, element_count, dimensions,
+        configuration.adaptive_filter_blocks);
+    launch_adaptive_fallback(
+        device_input.get(), device_plane_minima.get(), device_candidate_output.get(),
+        device_candidate_flags.get(), nullptr, element_count, dimensions,
+        configuration.adaptive_filter_blocks);
+    check_cuda(cudaMemcpy(result.baseline_output.data(), device_baseline_output.get(), bytes,
+                          cudaMemcpyDeviceToHost),
+               "balanced benchmark baseline output cudaMemcpy D2H");
+    check_cuda(cudaMemcpy(result.candidate_output.data(), device_candidate_output.get(), bytes,
+                          cudaMemcpyDeviceToHost),
+               "balanced benchmark candidate output cudaMemcpy D2H");
     return result;
 }
 
