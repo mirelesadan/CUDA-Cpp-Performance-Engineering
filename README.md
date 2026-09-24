@@ -2,7 +2,7 @@
 
 This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phases A and B are complete** for their established finite-`float64` Windows contracts. Phase A took a four-dimensional fixed median from an authoritative Python/4Denoise reference through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B extended that process to adaptive median filtering, ending with validated persistent adaptive CUDA ownership for Python.
 
-The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership; the next portfolio milestone is to define Project 2's exact 3D-median scientific contract. Projects 2–4 remain planned work.
+The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means, with its initial numerical contract defined in the roadmap; implementation has not begun. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
 
 ## Current status
 
@@ -36,7 +36,9 @@ The retained Phase B split CUDA path includes a measured balanced nine-value min
 | Phase B adaptive CUDA transfers/residency | Complete | Pageable/pinned one-shot paths and repeated full-device operations measured with exact outputs |
 | Phase B persistent adaptive Python CUDA owner | Complete | Exact public/local/subset/canonical outputs; 20 resident Python calls reached 28.221 ms/filter |
 | Phase B closeout | Complete | Reference, native CPU/OpenMP, profiled CUDA, transfer study, and Python workflow validated together |
-| Projects 2–4 | Planned | Problem statements and validation/performance questions only |
+| Project 2 — K-means | Contract defined; implementation next | Deterministic dense-`float32` Lloyd baseline, exact discrete behavior, and numerical validation rules specified |
+| Project 3 — matrix/tensor multiplication | Planned | Operation and validation details remain TBD |
+| 3D-median concept | Deferred | Revisit only if a distinct scientific transformation and new performance question are established |
 
 ## Project 1 Phase A results
 
@@ -85,7 +87,7 @@ Python reference
   → Phase B CUDA transfer/residency characterization [complete]
   → Phase B persistent adaptive Python ownership [complete]
   → Phase B validation and closeout [complete]
-  → Project 2 scientific 3D-median contract [next]
+  → Project 2 K-means Python reference and deterministic fixtures [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -134,11 +136,13 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
     python/validate_adaptive_cuda_owner.py
                                  adaptive Python owner correctness and timing
     *.ipynb                      output-cleared scientific reference notebooks
-02_4DSTEM_3D_Median_Filter/      planned
-03_CUDA_KMeans/                  planned
-04_CUDA_Matrix_Multiplication/   planned
+02_4DSTEM_3D_Median_Filter/      deferred concept; legacy directory prefix
+03_CUDA_KMeans/                  next active Project 2; legacy directory prefix
+04_CUDA_Matrix_Multiplication/   planned Project 3; legacy directory prefix
 ROADMAP.md                       staged development plan and completion state
 ```
+
+The placeholder directories retain their original numeric prefixes for now; no project files have been moved. The roadmap and project README titles give the intended project order.
 
 ## Build and validate the public fixture
 

@@ -1,4 +1,4 @@
-# Project 3 — General-Purpose CUDA K-Means
+# Project 2 — General-Purpose CUDA K-Means
 
 ## Objective
 
@@ -10,7 +10,7 @@ K-means demonstrates that the portfolio's performance-engineering skills general
 
 ## Problem definition
 
-Given generic samples with a later-defined dimensionality and a chosen number of clusters, iteratively assign samples to clusters and update cluster representatives until a later-defined stopping condition is met. The project will use generic synthetic and/or standard non-microscopy datasets. Dataset choice, initialization, distance metric, precision, empty-cluster behavior, convergence criteria, and reproducibility rules are **TBD**.
+The [portfolio roadmap](../ROADMAP.md) now defines the first deterministic Lloyd contract: dense finite row-major `float32` samples, reproducible sample-row initialization, squared-Euclidean assignment with lowest-index ties, mean updates with empty-centroid retention, assignment-stability convergence, a 100-update cap, and separate numerical validation rules. The reference and datasets have not been created yet.
 
 ## Planned workflow
 
@@ -36,7 +36,7 @@ Establish and profile a trusted reference; implement clear modern C++; validate 
 
 ## Validation strategy
 
-Correctness and convergence criteria will be defined before optimization. Because equivalent K-means solutions may differ in label ordering or local optimum, validation will use appropriately defined objective, assignment, centroid, and convergence comparisons rather than assuming byte-for-byte identity without justification.
+The initial fixed-order seed removes arbitrary cluster-label permutations from our own implementations. Public fixtures will require exact labels, update counts, and convergence behavior; centroids and independently recomputed inertia use the preregistered tight tolerances in the roadmap. External libraries may have different stopping and empty-cluster semantics, which must be disclosed rather than treated as exact equivalents.
 
 ## Benchmarking strategy
 
@@ -44,14 +44,11 @@ The reference, straightforward C++, optimized CPU, initial CUDA, and optimized C
 
 ## Status
 
-Planned
+Next active project; contract defined, implementation not started. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
-- **TBD:** Reference algorithm and implementation.
-- **TBD:** Generic synthetic and/or standard non-microscopy datasets.
-- **TBD:** Initialization and random-seed policy.
-- **TBD:** Distance metric, precision, convergence rule, and maximum iterations.
-- **TBD:** Empty-cluster behavior and deterministic/reproducible modes.
-- **TBD:** Target problem-size ranges and correctness metrics.
-- **TBD:** Hardware, toolchain, profiling tools, external comparisons, and binding approach.
+- **TBD:** Authoritative NumPy implementation and checked-in tiny public fixtures.
+- **TBD:** Public seeded benchmark generator and measured size/scaling results.
+- **TBD:** Profile-driven CUDA mapping, reduction, layout, and fusion decisions.
+- **TBD:** Availability and fair configuration of external libraries; binding approach.

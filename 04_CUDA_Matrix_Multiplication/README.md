@@ -1,4 +1,4 @@
-# Project 4 — CUDA Matrix / Tensor Multiplication
+# Project 3 — CUDA Matrix / Tensor Multiplication
 
 ## Objective
 

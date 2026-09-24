@@ -809,7 +809,7 @@ Completed reference and organization work:
 - characterized the retained balanced CUDA path with exact pageable, pinned-staged, and resident outputs; a fresh pageable one-shot native-wall median of 234.543 ms, 20-operation GPU-path effective cost of 24.587 ms/filter, and pinned staging that reduced isolated transfers but slowed the complete one-shot call.
 - added `CudaAdaptiveMedianBuffer` with explicit upload/filter/download, bitwise-exact public/local/subset/canonical Python outputs, and a measured 28.221 ms/filter across 20 resident calls (`6.540×` versus the fresh one-call owner baseline).
 
-Phase A status: **complete**. Phase B status for the established Windows finite-`float64`, `s=3`, `sMax=7` contract: **complete**. Next portfolio milestone: define the exact scientific 3D neighborhood/transformation contract and reference for Project 2 before native implementation.
+Phase A status: **complete**. Phase B status for the established Windows finite-`float64`, `s=3`, `sMax=7` contract: **complete**. The portfolio roadmap now prioritizes a general-purpose K-means Project 2; the separate 3D-median concept is deferred.
 
 ## Remaining TBDs
 

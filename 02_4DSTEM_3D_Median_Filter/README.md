@@ -1,12 +1,12 @@
-# Project 2 — 4D-STEM 3D Median Filter
+# Deferred concept — 4D-STEM 3D Median Filter
 
 ## Objective
 
-Apply the established performance-engineering workflow to a more computationally and memory-intensive three-dimensional median/neighborhood operation derived from 4D-STEM data.
+Potentially apply the established workflow to a more computationally and memory-intensive three-dimensional median/neighborhood operation derived from 4D-STEM data, if a distinct scientific contract is established.
 
 ## Why this project exists
 
-This project raises the difficulty after Project 1 by introducing a larger neighborhood and more demanding high-dimensional memory behavior. It should demonstrate deeper reasoning about data layout, cache effects, GPU memory access, thread organization, and scaling rather than simply repeating the 2D implementation.
+This could raise the difficulty after Project 1 through a larger neighborhood and more demanding high-dimensional memory behavior. For now, Project 1 already supplies substantial median-filter evidence, so general-purpose K-means is the next active portfolio project instead.
 
 ## Problem definition
 
@@ -44,7 +44,7 @@ Comparisons will cover reference, straightforward C++, optimized CPU, initial CU
 
 ## Status
 
-Planned
+Deferred; no implementation scheduled. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 

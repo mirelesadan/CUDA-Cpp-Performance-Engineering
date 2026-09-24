@@ -158,41 +158,46 @@ That median-network experiment was completed and rejected on 2026-09-24. A 20-co
 
 Retained-path adaptive CUDA transfer/residency characterization completed on 2026-09-24 without kernel changes. Public/local/subset/canonical pageable, pinned-staged, and repeated-resident outputs were bitwise exact against optimized CPU and balanced CUDA; diagnostic counters and host inputs remained unchanged. In the second controlled AC-powered CUDA 12.9 `sm_89` Release sequence, seven alternating one-shot calls gave pageable/pinned native-wall medians of `234.543/277.895` ms and event H2D-through-D2H medians of `93.793/88.566` ms. Across 20 paired synchronous transfer-only runs, pageable/pinned H2D medians were `42.758/37.085` ms and D2H medians `42.133/35.176` ms; staging copies erased the isolated transfer gain in complete one-shot calls. Five sequences per resident count gave effective event-path medians of `125.403, 67.459, 39.324, 29.425, 24.587` ms/filter at 1, 2, 5, 10, 20 complete operations on the same resident input, with one initial H2D and final D2H. At 20 operations, complete device work was `20.197` ms/filter and transfers were 17.64% of the GPU path. Fresh serial/OpenMP-16 filter medians were `3275.932/424.181` ms, so pageable one-shot native wall was `13.967×/1.809×` faster; resident GPU-path-only comparisons exclude host allocation/setup and are not application end-to-end speedups. The earlier full sequence confirmed the trend but showed laptop timing drift. Canonical resident device buffers total 803,005,125 bytes (~765.8 MiB), including 47,228,125 dense flag bytes. This motivated a persistent adaptive CUDA Python owner, not pinned staging or another kernel experiment.
 
-The Phase B persistent adaptive CUDA Python owner was completed on 2026-09-24 without kernel or algorithm changes. `CudaAdaptiveMedianBuffer(shape)` owns the same four device buffers (~765.8 MiB canonical), exposes explicit validated `upload()`, complete synchronized `filter()`, and independent-array `download()`, and keeps repeated calls on the same resident input rather than chaining outputs. Public (196), ignored local (4,096), representative (143,360), and canonical (47,228,125) Python outputs matched the established native/Python references bit for bit. Input/output ownership, replacement upload, lifecycle errors, and Phase A/B regressions passed. In the more stable five-run AC-powered Python sequence, a newly constructed one-call owner took `184.567` ms median; one upload, 20 complete filters, and one download on an already allocated owner took `28.221` ms/filter (`6.540×` lower effective wall time). The complete synchronized Python filter call was `20.312` ms median at 20 repetitions; upload/download medians were `89.719/66.490` ms. An earlier complete sequence confirmed the direction (`193.526` to `28.268` ms/filter). Python wall timing includes NumPy validation/output allocation and differs from native CUDA-event boundaries. With scientific reference, profiled serial/OpenMP/CUDA progression, transfer evidence, persistent Python ownership, and exact canonical validation complete, Phase B closes for the established Windows finite-`float64`, `s=3`, `sMax=7` contract. Broader problem-size and Linux validation remain future portability studies. Next portfolio milestone: define Project 2's exact 3D neighborhood/transformation and scientific reference.
+The Phase B persistent adaptive CUDA Python owner was completed on 2026-09-24 without kernel or algorithm changes. `CudaAdaptiveMedianBuffer(shape)` owns the same four device buffers (~765.8 MiB canonical), exposes explicit validated `upload()`, complete synchronized `filter()`, and independent-array `download()`, and keeps repeated calls on the same resident input rather than chaining outputs. Public (196), ignored local (4,096), representative (143,360), and canonical (47,228,125) Python outputs matched the established native/Python references bit for bit. Input/output ownership, replacement upload, lifecycle errors, and Phase A/B regressions passed. In the more stable five-run AC-powered Python sequence, a newly constructed one-call owner took `184.567` ms median; one upload, 20 complete filters, and one download on an already allocated owner took `28.221` ms/filter (`6.540×` lower effective wall time). The complete synchronized Python filter call was `20.312` ms median at 20 repetitions; upload/download medians were `89.719/66.490` ms. An earlier complete sequence confirmed the direction (`193.526` to `28.268` ms/filter). Python wall timing includes NumPy validation/output allocation and differs from native CUDA-event boundaries. With scientific reference, profiled serial/OpenMP/CUDA progression, transfer evidence, persistent Python ownership, and exact canonical validation complete, Phase B closes for the established Windows finite-`float64`, `s=3`, `sMax=7` contract. Broader problem-size and Linux validation remain future portability studies. The next active project is general-purpose CUDA K-means; no further Project 1 optimization is planned.
 
 ### Intended contribution
 
 Demonstrate a credible progression from a controlled fixed-window exercise to a measured adaptive bottleneck, then through modern C++, CPU optimization, CUDA, GPU profiling, validation, Python integration, and clear performance reporting.
 
-## Project 2 — 4D-STEM 3D Median Filter
+## Project 2 — General-Purpose CUDA K-Means
+
+The existing placeholder directory prefixes still reflect the earlier order; no files are being renamed or moved in this transition. K-means is the next active project, while the old 3D-median concept is deferred and matrix/tensor multiplication follows as Project 3.
 
 ### Purpose
 
-Extend the learned workflow to a more computationally and memory-intensive high-dimensional neighborhood operation.
+Demonstrate that the acquired performance-engineering skills generalize beyond microscopy. Unlike Project 1's scan-space neighborhoods, K-means has point-to-centroid distance work, assignment, many-to-one centroid reductions, synchronization, iterative convergence, and changing CPU/GPU economics across `N`, `D`, `K`, and iteration count.
 
-### Currently known problem
+### Initial algorithmic contract — proposed baseline
 
-The broad idea is to reorganize, unfold, or reshape 4D-STEM information into a long three-dimensional representation and perform a local 3D median/neighborhood filter. The exact transformation and scientific algorithm are TBD and must come from the intended research method rather than being inferred here.
+- Input `X` is a dense, finite, C-contiguous, row-major `float32` array of shape `(N, D)`. The first supported range is `2 <= K <= min(N,32)`, `K <= N <= 2^20`, `1 <= D <= 32`, and `|X[i,d]| <= 1024`; these bounds keep the initial floating-point and memory domain explicit. `K` is fixed during a fit but supplied at runtime; `max_updates` is an integer from 1 through 100 (default 100). No weights, sparse data, normalization, multiple restarts, or random initialization. Input is unchanged.
+- Initialize centroid `k` from a copy of row `((2k + 1) * N) // (2 * K)` of `X`, using integer arithmetic for `k = 0..K-1`. This gives one deterministic run and stable cluster identities. Assign every sample to the centroid minimizing squared Euclidean distance, `sum_d (X[i,d] - C[k,d])^2`; exact distance ties select the lowest cluster index.
+- Make an initial assignment `A0`. Each update pass computes the arithmetic mean of all points with the previous assignment for each nonempty cluster, rounds each coordinate to `float32`, and retains the preceding centroid for an empty cluster. Reassign all points against these new centroids. Stop after the first pass whose new labels equal the preceding labels, or after `max_updates` passes. No movement tolerance or implicit reseeding.
+- Return a new `int32[N]` label array, a new C-contiguous `float32[K,D]` centroid array, the number of update passes, and a convergence Boolean. Returned labels are the final assignment against returned centroids. If the update cap is reached without convergence, those centroids may reflect the preceding labels; this is reported as nonconverged. Inertia is a separately recomputed `float64` diagnostic, `sum_i ||X[i] - C_final[A_final[i]]||^2`, not a hidden part of timed fit calls.
+
+The authoritative Python reference will be transparent NumPy code using `float64` distance/mean accumulation over the supplied `float32` values, with centroid coordinates rounded to `float32` after each update. It should process distances in bounded sample chunks rather than materializing an `N × K × D` tensor at GPU-scale sizes. This defines the numerical oracle, not a requirement that every optimized reduction use the same execution order.
+
+### Validation and public workloads
+
+Hand-authored public fixtures (`N=16–64`, small `D`/`K`) must cover lowest-index ties, duplicate initial centroids and empty clusters, singleton clusters, stable convergence, and a forced `max_updates` cutoff. On every published fixture and benchmark input, require exact initialization indices, labels, update counts, convergence flags, shapes, dtypes, and input immutability; a near-boundary label mismatch fails this gate and its distance margin is diagnostic, not an exemption. Compare centroid coordinate `d` with the oracle within `5e-6 × S_d`, where `S_d=max(1,max_i|X[i,d]|)`; compare independently recomputed inertia within `2e-5 × max(1,I_reference)`. An exactly representable constant-point fixture must yield exactly zero inertia. These are preregistered starting limits, not values to widen merely to pass CUDA. Bitwise equality is not generally required for parallel floating-point sums; behavior on arbitrary untested near-boundary inputs cannot be guaranteed by a finite test suite.
+
+Use only public deterministic synthetic data: hand-authored tiny fixtures; a seeded, version-recorded moderate `(N,D,K)=(65,536,8,16)` profiling workload; and `(262,144,16,16)` plus an optional `(1,048,576,32,32)` GPU-scale stress workload. Vary `N`, `D`, and `K` independently after the first baseline. Do not require private microscopy data. For like-for-like stage timing, plan a benchmark-only fixed-pass mode that runs exactly `T` update/reassignment passes without early exit; measure normal convergence separately and report actual passes. Fixed-pass mode is not part of the public fit contract.
+
+### Engineering path and decisions to defer
+
+Build the Python reference and fixtures first, then a straightforward serial C++ implementation, native profiling and measured scalar changes, OpenMP, correctness-first CUDA, Nsight-guided stage optimization, transfer/device-residency characterization, and a Python interface only when useful. Separate assignment, centroid update, convergence, transfers, and whole-fit time. Do not predetermine CUDA point mapping, AoS versus SoA layout, atomics versus hierarchical reductions, centroid caching, kernel fusion, or convergence-reduction strategy before baseline measurements.
+
+Later compare with the [scikit-learn CPU KMeans](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html) and, only if practical, [RAPIDS cuVS/cuML GPU K-means](https://docs.rapids.ai/api/cuvs/stable/c_api/cluster_kmeans_c/). Supply the same initial centroids and disclose differences in empty-cluster and stopping semantics, actual iteration counts, precision, and included setup/transfer costs. Report objective quality, whole-fit time and per-stage time, CPU/GPU crossover, and the custom implementation's fraction of library throughput where comparable; beating a mature library is not required.
 
 ### Intended contribution
 
-Explore how dimensionality, neighborhood size, memory traffic, layout, cache effects, GPU memory behavior, thread organization, and volume scaling change the performance problem. It should build on Project 1 without merely copying it.
+Show a different, iterative reduction-heavy GPU workload and explain measured design tradeoffs rather than reproduce Project 1's neighborhood optimization sequence.
 
-## Project 3 — General-Purpose CUDA K-Means
-
-### Purpose
-
-Demonstrate that the acquired performance-engineering skills generalize beyond microscopy to a standard machine-learning algorithm.
-
-### Currently known problem
-
-Develop a general-purpose K-means progression using generic synthetic and/or standard non-microscopy datasets. Study the different computational characteristics of assignment and update phases, convergence/correctness, transfer costs, and scaling with samples, dimensions, and clusters. Final datasets, initialization rules, convergence criteria, precision, and interface are TBD.
-
-### Intended contribution
-
-Provide a broadly applicable machine-learning example with meaningful CPU/GPU crossover analysis at sufficiently large, later-selected problem sizes. Microscopy is not the application or motivation for this project.
-
-## Project 4 — CUDA Matrix / Tensor Multiplication
+## Project 3 — CUDA Matrix / Tensor Multiplication
 
 ### Purpose
 
@@ -206,18 +211,21 @@ Progress from clear CPU and CUDA baselines toward increasingly optimized dense m
 
 Explain why mature AI libraries are fast. Comparison with NVIDIA cuBLAS should eventually provide a relevant performance reference; beating cuBLAS is not the objective. A successful result will quantify improvement over the custom baseline, report the fraction of relevant mature-library performance reached, and use profiling to explain the remaining gap. NumPy, PyTorch, or TensorFlow comparisons may be added later when methodologically appropriate.
 
+## Deferred concept — 4D-STEM 3D Median Filter
+
+The former Project 2 remains a research concept, not an active numbered deliverable. Its transformation, neighborhood, and scientific reference are still undefined. It could become valuable if that operation proves scientifically distinct and exposes a new memory/layout question; otherwise another median would overlap Project 1's fixed/adaptive CPU, OpenMP, CUDA, profiling, residency, and Python evidence. Its existing directory is retained without moving files during this roadmap transition.
+
 ## How the projects complement one another
 
 1. **Project 1:** Apply the complete workflow to an authentic scientific bottleneck.
-2. **Project 2:** Address a harder, higher-dimensional, memory-intensive scientific workload.
-3. **Project 3:** Transfer the same reasoning to a general-purpose machine-learning algorithm.
-4. **Project 4:** Study a core primitive underlying AI workloads and compare with a highly optimized NVIDIA library.
+2. **Project 2:** Transfer the same reasoning to general-purpose, iterative K-means assignment and reductions.
+3. **Project 3:** Study a core primitive underlying AI workloads and compare with a highly optimized NVIDIA library.
 
 Together, the projects retain the credibility of real scientific problems while demonstrating that the resulting C++/CUDA skills are not confined to microscopy.
 
 ## Expected learning progression
 
-Project 1 establishes foundational C++, multidimensional memory representation, measurement, introductory CUDA, and integration. Project 2 deepens memory-system and scaling analysis. Project 3 adds a more general algorithm with distinct computational phases and workload parameters. Project 4 culminates in increasingly sophisticated GPU optimization and comparison with a mature performance ceiling.
+Project 1 establishes foundational C++, multidimensional memory representation, measurement, CUDA, and integration. Project 2 adds a general-purpose iterative algorithm with distinct assignment and reduction phases, convergence, and workload parameters. Project 3 studies a dense computational primitive against a mature performance ceiling. The 3D-median idea remains deferred pending a distinct scientific contract.
 
 Later projects should reuse principles and measurement discipline, but each should introduce a new performance question rather than repeat an earlier implementation mechanically.
 
@@ -309,35 +317,23 @@ All projects currently live in this public parent portfolio, and future work sho
 - [x] Document the measured engineering story and close Phase B for the established contract
 - [x] Final pre-native repository/data organization
 
-### Project 2 — 4D-STEM 3D Median Filter
+### Project 2 — General-Purpose CUDA K-Means
 
-- [ ] Define the intended scientific transformation and neighborhood operation
-- [ ] Establish representative reference data and correctness criteria
-- [ ] Profile the reference implementation
-- [ ] Implement and validate straightforward C++
-- [ ] Benchmark, profile, and optimize the CPU implementation
-- [ ] Implement and validate initial CUDA
-- [ ] Profile and optimize CUDA
-- [ ] Add an appropriate Python interface
-- [ ] Benchmark implementations across representative volume sizes
-- [ ] Document results, limitations, and lessons
-- [ ] Final repository cleanup
-
-### Project 3 — General-Purpose CUDA K-Means
-
-- [ ] Define general-purpose scope, datasets, and convergence criteria
-- [ ] Establish and profile a trusted reference
+- [x] Define the first deterministic scope, algorithm, and validation contract
+- [ ] Create the authoritative NumPy reference and public deterministic fixtures
+- [ ] Validate and profile the reference on the moderate public workload
 - [ ] Implement and validate straightforward C++
 - [ ] Benchmark, profile, and optimize CPU phases
 - [ ] Implement and validate initial CUDA
-- [ ] Profile and optimize assignment and update phases
-- [ ] Analyze transfer costs and CPU/GPU crossover behavior
-- [ ] Add an appropriate Python interface
-- [ ] Benchmark scaling across samples, dimensions, and clusters
+- [ ] Profile CUDA and optimize measured assignment/update bottlenecks
+- [ ] Analyze transfer, iteration, residency, and CPU/GPU crossover costs
+- [ ] Add a Python interface if it improves the demonstrated workflow
+- [ ] Benchmark separate `N`, `D`, `K`, and iteration-count scaling
+- [ ] Compare fairly with available established CPU/GPU libraries
 - [ ] Document results, limitations, and lessons
 - [ ] Final repository cleanup
 
-### Project 4 — CUDA Matrix / Tensor Multiplication
+### Project 3 — CUDA Matrix / Tensor Multiplication
 
 - [ ] Define operation scope, shapes, data types, and correctness criteria
 - [ ] Establish trusted reference implementations
@@ -350,6 +346,10 @@ All projects currently live in this public parent portfolio, and future work sho
 - [ ] Add an appropriate Python interface if useful
 - [ ] Document performance progression and the remaining library gap
 - [ ] Final repository cleanup
+
+### Deferred — 4D-STEM 3D Median Filter
+
+- [ ] Reconsider only after defining a distinct scientific transformation and performance question
 
 ## Rules for Future Development
 
