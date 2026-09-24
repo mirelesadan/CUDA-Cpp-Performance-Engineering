@@ -4,7 +4,7 @@
 
 Project 1 develops one performance-engineering workflow through two related real-space median filters on 4D-STEM data. Phase A is a controlled fixed-window warm-up; Phase B is the main adaptive-median performance target.
 
-The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings use direct validated NumPy buffers, and the CUDA binding offers both one-shot execution and explicit persistent device ownership. Phase B has now begun with a separate correctness-first native adaptive-median baseline.
+The straightforward Phase A C++ baseline applies the fixed `3 × 3` scan-space median and matches the Python reference bit for bit. It remains available beside the optimized-serial, OpenMP, and correctness-first CUDA implementations. The full-input Release baseline, CPU profiles, isolated serial and CUDA experiments, Windows multicore scaling, CUDA profiling, stabilized kernel benchmark, transfer/residency characterization, and Python interface experiments are recorded below. CPU bindings use direct validated NumPy buffers, and the CUDA binding offers both one-shot execution and explicit persistent device ownership. Phase B has progressed from its exact native adaptive-median baseline through measured CPU and CUDA work to native transfer/residency characterization; an adaptive Python owner is not yet implemented.
 
 ## Performance boundary
 
@@ -57,10 +57,16 @@ cpp/
     CMakeLists.txt
     include/
         adaptive_median.hpp
+        adaptive_median_cuda.hpp
+        adaptive_median_cuda_transfer_experiment.hpp
         fixed_median.hpp
         fixed_median_cuda.hpp
     src/
         adaptive_median.cpp
+        adaptive_median_cuda.cu
+        adaptive_cuda_benchmark.cpp
+        adaptive_cuda_transfer_characterization.cpp
+        adaptive_cuda_validation.cpp
         adaptive_benchmark.cpp
         adaptive_validation.cpp
         cuda_benchmark.cpp
@@ -100,11 +106,12 @@ On this Windows system, CUDA 12.9 is selected explicitly because its Visual Stud
 
 ```bat
 cmake -S cpp -B cpp/out/cuda -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPHASE_A_ENABLE_CUDA=ON -DPHASE_A_CUDA_ARCHITECTURES=89
-cmake --build cpp/out/cuda --config Release --target phase_a_cuda_validation phase_a_cuda_benchmark phase_a_cuda_kernel_benchmark phase_a_cuda_transfer_characterization phase_b_adaptive_cuda_validation phase_b_adaptive_cuda_benchmark
+cmake --build cpp/out/cuda --config Release --target phase_a_cuda_validation phase_a_cuda_benchmark phase_a_cuda_kernel_benchmark phase_a_cuda_transfer_characterization phase_b_adaptive_cuda_validation phase_b_adaptive_cuda_benchmark phase_b_cuda_transfer
 cpp\out\cuda\Release\phase_a_cuda_validation.exe
 cpp\out\cuda\Release\phase_a_cuda_benchmark.exe
 cpp\out\cuda\Release\phase_a_cuda_kernel_benchmark.exe
 cpp\out\cuda\Release\phase_a_cuda_transfer_characterization.exe
+cpp\out\cuda\Release\phase_b_cuda_transfer.exe
 ```
 
 Other installations with registered CUDA integration may omit the explicit `-T` selection; `PHASE_A_CUDA_ARCHITECTURES` remains overridable for other GPUs. No Visual Studio or toolkit installation was modified.
@@ -643,6 +650,31 @@ One separate candidate replaced only the balanced common kernel's 19-comparator,
 
 Normal `sm_89` Release timing used persistent buffers, five warm-ups, and three seven-pair CUDA-event sequences with alternating launch order and reversed starting order. The sequence control/candidate medians were `12.953600/13.629440`, `12.954624/13.633536`, and `12.957632/13.634560` ms. Across all 21 pairs, medians were `12.954624/13.632512` ms (control/candidate ranges `12.935936–12.964864` / `13.616832–13.690880`): the candidate was 5.23% slower, despite using 40 rather than 46 registers/thread and zero compiled stack/local allocation in both. Theoretical occupancy rose from 83.33% to 100%; achieved occupancy and stalls were not reprofiled because the candidate regressed. Combined common-plus-fallback timing was not warranted. The experimental source/build/test changes were discarded; the balanced path remains retained. The next experiment should characterize Phase B transfer and data-residency costs, rather than continue kernel micro-optimization on this laptop.
 
+### Phase B adaptive CUDA transfer and residency — 2026-09-24
+
+The benchmark-only `phase_b_cuda_transfer` target leaves all retained adaptive kernels unchanged. Pageable one-shot, pinned-staged one-shot, and resident outputs matched the balanced CUDA diagnostic path bit for bit on the public (196), ignored local (4,096), representative (143,360), and canonical (47,228,125) workloads. The optimized CPU reference and all ten diagnostic counters also agreed; host inputs remained unchanged. Phase A and Phase B native regressions passed.
+
+On AC power, the CUDA 12.9 `sm_89` Release run used two warm-ups and seven alternating pageable/pinned one-shot calls; three transfer-pair warm-ups and 20 alternating transfer-only pairs; and three complete-pipeline warm-ups plus five rotated sequences for each resident count. CUDA events bracketed synchronous H2D, all three adaptive device stages, and D2H. `steady_clock` separately measured complete native calls and host setup; correctness comparison and file I/O were outside timing. One-shot calls allocated/freed device buffers and a new host output; the pinned staging buffer was reused, with its one-time allocation/release reported separately. Resident sequences allocated device buffers before timing, copied the original input once, independently ran the complete plane-minimum/common/fallback pipeline on that same input, overwrote output/flags each time, and copied only the final output back. They do **not** repeatedly filter the preceding output. Event-bracketed pageable copies include synchronous runtime/staging behavior and should not be read as pure DMA bandwidth. Medians of component series need not sum to the median total.
+
+| Canonical one-shot path | Native wall median | Event H2D→D2H median | H2D / plane min / common / fallback / D2H medians |
+| --- | ---: | ---: | ---: |
+| Pageable | 234.543 ms | 93.793 ms | 36.164 / 1.693 / 16.398 / 1.354 / 38.315 ms |
+| Pinned staging | 277.895 ms | 88.566 ms | Device transfer pair improved; two host staging copies added 24.109 / 24.596 ms |
+
+The seven pageable native-wall runs ranged 223.877–247.540 ms (3.60% CV); event GPU-path runs ranged 89.241–103.088 ms (5.30% CV). Pageable host preparation—input validation plus new output allocation—had a 115.574 ms median; `cudaMalloc`/`cudaFree` medians were 1.423/6.025 ms. The pinned staging buffer's once-per-session allocation/release cost 40.801/16.862 ms and is excluded from its one-shot medians. In the 20-pair transfer-only check, pageable/pinned H2D medians were 42.758/37.085 ms (7.52%/5.56% CV), and D2H medians were 42.133/35.176 ms (8.00%/5.07% CV). Thus pinned transfers improved by about 13%/17%, but staging made the full one-shot native call slower by 18.5%; no pinned application path was retained.
+
+| Complete resident operations | Total event-path median | Effective median/filter | Complete device work/filter | Median transfer fraction |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 125.403 ms | 125.403 ms | 19.350 ms | 84.52% |
+| 2 | 134.919 ms | 67.459 ms | 20.543 ms | 70.64% |
+| 5 | 196.621 ms | 39.324 ms | 20.395 ms | 48.14% |
+| 10 | 294.251 ms | 29.425 ms | 20.452 ms | 31.35% |
+| 20 | 491.734 ms | 24.587 ms | 20.197 ms | 17.64% |
+
+The 20-operation effective-cost series ranged 24.325–25.862 ms/filter (2.22% CV). The fresh serial/OpenMP-16 filter-call medians were 3275.932/424.181 ms; pageable one-shot **native wall** was `13.967×/1.809×` faster. The 20-operation **GPU-path-only** effective cost was `3.815×` lower than pageable one-shot's event path and `133.240×/17.252×` lower than the CPU filter-call medians; this last comparison has different allocation/host timing boundaries and is not a Python end-to-end speedup. An earlier full AC-powered sequence confirmed the directional result despite laptop drift: pageable/pinned native-wall medians were 248.268/289.093 ms, and 20 resident operations cost 22.891 ms/filter. The original 264.061 ms one-shot event median above belongs to the earlier monolithic CUDA baseline, not this retained balanced split path.
+
+Canonical resident device storage is 377,825,000 bytes each for input and output, 127,000 bytes for plane minima, and 47,228,125 bytes for dense flags: 803,005,125 bytes total (about 765.8 MiB), excluding the separate benchmark-only 377,825,000-byte pinned host staging buffer. Transfer remains the majority of a single GPU path and falls below one fifth of the measured 20-operation path; the complete device pipeline stays near 20 ms/filter. The next step is a persistent adaptive CUDA Python owner analogous to Phase A's `CudaMedianBuffer`, so callers can deliberately amortize transfers without changing the kernels or numerical contract.
+
 ## Data
 
 Four data roles are deliberately separate:
@@ -693,7 +725,7 @@ For authorized local scientific work, place the experimental source outside vers
 
 Phase A completed the short infrastructure and learning path: clear C++, validation, benchmarking, CPU profiling and optimization, portable multicore execution, CUDA profiling and controlled experiments, transfer characterization, and Python integration.
 
-Phase B reproduces the exact adaptive contract in clear C++, then progresses through profiled serial optimizations, portable OpenMP, an exact CUDA baseline, a retained common/fallback CUDA split, and an isolated balanced min/max reduction. A lower-dependency median network was validated but rejected after paired timing; transfer and residency costs are the next controlled question.
+Phase B reproduces the exact adaptive contract in clear C++, then progresses through profiled serial optimizations, portable OpenMP, an exact CUDA baseline, a retained common/fallback CUDA split, and an isolated balanced min/max reduction. A lower-dependency median network was validated but rejected after paired timing. Native transfer/residency characterization now points to explicit persistent adaptive GPU ownership for future Python use, rather than further kernel micro-optimization.
 
 ## Status
 
@@ -734,8 +766,9 @@ Completed reference and organization work:
 - focused profiling of the retained common CUDA kernel, identifying L1TEX-queue and short-scoreboard stalls after elimination of monolithic local-memory traffic.
 - retained balanced min/max common-kernel variant with exact public/local/subset/canonical and counter agreement, a repeatable 6.63–8.70% common-kernel reduction, and a focused resource/stall comparison.
 - rejected lower-dependency median network: exact selector and full-workload results, but a repeatable 5.23% common-kernel regression despite fewer registers.
+- characterized the retained balanced CUDA path with exact pageable, pinned-staged, and resident outputs; a fresh pageable one-shot native-wall median of 234.543 ms, 20-operation GPU-path effective cost of 24.587 ms/filter, and pinned staging that reduced isolated transfers but slowed the complete one-shot call.
 
-Phase A status: **complete**. Phase B balanced split adaptive CUDA variant: **complete and retained**. Next: characterize Phase B CUDA transfers and data residency.
+Phase A status: **complete**. Phase B balanced split adaptive CUDA variant and native transfer/residency characterization: **complete**. Next: implement a persistent adaptive CUDA Python owner without changing the retained kernels.
 
 ## Remaining TBDs
 

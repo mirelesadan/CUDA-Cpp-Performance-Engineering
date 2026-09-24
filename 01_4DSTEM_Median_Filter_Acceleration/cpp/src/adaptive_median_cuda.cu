@@ -1,4 +1,5 @@
 #include "adaptive_median_cuda.hpp"
+#include "adaptive_median_cuda_transfer_experiment.hpp"
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -8,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -93,6 +95,45 @@ public:
     DeviceBuffer& operator=(const DeviceBuffer&) = delete;
 
     T* get() { return static_cast<T*>(pointer_); }
+
+    void release()
+    {
+        if (pointer_ != nullptr) {
+            check_cuda(cudaFree(pointer_), "cudaFree");
+            pointer_ = nullptr;
+        }
+    }
+
+private:
+    void* pointer_ = nullptr;
+};
+
+template <typename T>
+class PinnedHostBuffer {
+public:
+    explicit PinnedHostBuffer(std::size_t count)
+    {
+        check_cuda(cudaMallocHost(&pointer_,
+                                  checked_multiply(count, sizeof(T), "Pinned buffer size overflow.")),
+                   "cudaMallocHost");
+    }
+
+    ~PinnedHostBuffer()
+    {
+        if (pointer_ != nullptr) cudaFreeHost(pointer_);
+    }
+
+    PinnedHostBuffer(const PinnedHostBuffer&) = delete;
+    PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
+    T* get() { return static_cast<T*>(pointer_); }
+
+    void release()
+    {
+        if (pointer_ != nullptr) {
+            check_cuda(cudaFreeHost(pointer_), "cudaFreeHost");
+            pointer_ = nullptr;
+        }
+    }
 
 private:
     void* pointer_ = nullptr;
@@ -1280,5 +1321,302 @@ benchmark_adaptive_median_s3_smax7_cuda_balanced_common(
                "balanced benchmark candidate output cudaMemcpy D2H");
     return result;
 }
+
+namespace detail {
+namespace {
+
+using HostClock = std::chrono::steady_clock;
+
+double host_milliseconds(HostClock::time_point begin, HostClock::time_point end)
+{
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+void require_exact_output(const std::vector<double>& actual,
+                          const std::vector<double>& expected,
+                          const char* label)
+{
+    if (actual.size() != expected.size() ||
+        std::memcmp(actual.data(), expected.data(), actual.size() * sizeof(double)) != 0) {
+        throw std::runtime_error(std::string(label) + " differs bit for bit from retained CUDA.");
+    }
+}
+
+struct OneShotOutput {
+    AdaptiveTransferOneShotSample timing;
+    std::vector<double> output;
+};
+
+OneShotOutput measure_one_shot(
+    const std::vector<double>& input,
+    const phase_a::Dimensions4D& dimensions,
+    PinnedHostBuffer<double>* pinned_staging)
+{
+    const auto wall_start = HostClock::now();
+    validate_input(input, dimensions);
+    const auto configuration = adaptive_median_cuda_kernel_configuration(dimensions);
+    const std::size_t count = input.size();
+    const std::size_t plane_count = dimensions.detector_y * dimensions.detector_x;
+    const std::size_t bytes = count * sizeof(double);
+    OneShotOutput result;
+    result.output.resize(count);
+    result.timing.host_preparation_ms = host_milliseconds(wall_start, HostClock::now());
+
+    if (pinned_staging != nullptr) {
+        const auto begin = HostClock::now();
+        std::memcpy(pinned_staging->get(), input.data(), bytes);
+        result.timing.host_to_pinned_ms = host_milliseconds(begin, HostClock::now());
+    }
+
+    const auto allocate_start = HostClock::now();
+    DeviceBuffer<double> device_input(count);
+    DeviceBuffer<double> device_output(count);
+    DeviceBuffer<double> device_minima(plane_count);
+    DeviceBuffer<std::uint8_t> device_flags(count);
+    result.timing.device_allocation_ms = host_milliseconds(allocate_start, HostClock::now());
+
+    {
+        const auto events_start = HostClock::now();
+        Event total_start;
+        Event h2d_stop;
+        Event minimum_stop;
+        Event common_stop;
+        Event fallback_stop;
+        Event total_stop;
+        result.timing.event_setup_ms = host_milliseconds(events_start, HostClock::now());
+
+        record(total_start, "one-shot before H2D");
+        check_cuda(cudaMemcpy(device_input.get(),
+                              pinned_staging ? pinned_staging->get() : input.data(),
+                              bytes, cudaMemcpyHostToDevice), "one-shot H2D");
+        record(h2d_stop, "one-shot after H2D");
+        launch_plane_minimum(device_input.get(), device_minima.get(), dimensions,
+                             configuration.plane_minimum_blocks);
+        record(minimum_stop, "one-shot after plane minimum");
+        launch_adaptive_common_3x3_balanced(
+            device_input.get(), device_minima.get(), device_output.get(),
+            device_flags.get(), nullptr, count, dimensions,
+            configuration.adaptive_filter_blocks);
+        record(common_stop, "one-shot after balanced common");
+        launch_adaptive_fallback(
+            device_input.get(), device_minima.get(), device_output.get(),
+            device_flags.get(), nullptr, count, dimensions,
+            configuration.adaptive_filter_blocks);
+        record(fallback_stop, "one-shot after fallback");
+        check_cuda(cudaMemcpy(pinned_staging ? pinned_staging->get() : result.output.data(),
+                              device_output.get(), bytes, cudaMemcpyDeviceToHost),
+                   "one-shot D2H");
+        record(total_stop, "one-shot after D2H");
+        check_cuda(cudaEventSynchronize(total_stop.get()), "one-shot synchronization");
+
+        result.timing.host_to_device_ms = elapsed(total_start, h2d_stop);
+        result.timing.plane_minimum_ms = elapsed(h2d_stop, minimum_stop);
+        result.timing.common_3x3_ms = elapsed(minimum_stop, common_stop);
+        result.timing.fallback_ms = elapsed(common_stop, fallback_stop);
+        result.timing.device_to_host_ms = elapsed(fallback_stop, total_stop);
+        result.timing.gpu_path_ms = elapsed(total_start, total_stop);
+    }
+
+    if (pinned_staging != nullptr) {
+        const auto begin = HostClock::now();
+        std::memcpy(result.output.data(), pinned_staging->get(), bytes);
+        result.timing.pinned_to_host_ms = host_milliseconds(begin, HostClock::now());
+    }
+
+    const auto free_start = HostClock::now();
+    device_flags.release();
+    device_minima.release();
+    device_output.release();
+    device_input.release();
+    result.timing.device_free_ms = host_milliseconds(free_start, HostClock::now());
+    result.timing.native_wall_ms = host_milliseconds(wall_start, HostClock::now());
+    return result;
+}
+
+AdaptiveResidentSample measure_resident(
+    const std::vector<double>& input,
+    const std::vector<double>& expected,
+    const phase_a::Dimensions4D& dimensions,
+    std::size_t repetition_count)
+{
+    if (repetition_count == 0) throw std::invalid_argument("Resident repetition count is zero.");
+    const auto configuration = adaptive_median_cuda_kernel_configuration(dimensions);
+    const std::size_t count = input.size();
+    const std::size_t plane_count = dimensions.detector_y * dimensions.detector_x;
+    const std::size_t bytes = count * sizeof(double);
+    std::vector<double> output(count);
+    DeviceBuffer<double> device_input(count);
+    DeviceBuffer<double> device_output(count);
+    DeviceBuffer<double> device_minima(plane_count);
+    DeviceBuffer<std::uint8_t> device_flags(count);
+    Event total_start;
+    Event h2d_stop;
+    Event device_stop;
+    Event total_stop;
+
+    const auto launch_complete_filter = [&]() {
+        launch_plane_minimum(device_input.get(), device_minima.get(), dimensions,
+                             configuration.plane_minimum_blocks);
+        launch_adaptive_common_3x3_balanced(
+            device_input.get(), device_minima.get(), device_output.get(),
+            device_flags.get(), nullptr, count, dimensions,
+            configuration.adaptive_filter_blocks);
+        launch_adaptive_fallback(
+            device_input.get(), device_minima.get(), device_output.get(),
+            device_flags.get(), nullptr, count, dimensions,
+            configuration.adaptive_filter_blocks);
+    };
+
+    // Warm up on the original input, then include exactly one H2D in the timed path.
+    check_cuda(cudaMemcpy(device_input.get(), input.data(), bytes, cudaMemcpyHostToDevice),
+               "resident warm-up H2D");
+    for (int warmup = 0; warmup < 3; ++warmup) launch_complete_filter();
+    check_cuda(cudaDeviceSynchronize(), "resident warm-up synchronization");
+
+    record(total_start, "resident before initial H2D");
+    check_cuda(cudaMemcpy(device_input.get(), input.data(), bytes, cudaMemcpyHostToDevice),
+               "resident timed H2D");
+    record(h2d_stop, "resident after initial H2D");
+    for (std::size_t iteration = 0; iteration < repetition_count; ++iteration) {
+        // Independent calls on the same input overwrite output and flags.
+        launch_complete_filter();
+    }
+    record(device_stop, "resident after complete adaptive operations");
+    check_cuda(cudaMemcpy(output.data(), device_output.get(), bytes, cudaMemcpyDeviceToHost),
+               "resident final D2H");
+    record(total_stop, "resident after final D2H");
+    check_cuda(cudaEventSynchronize(total_stop.get()), "resident synchronization");
+    require_exact_output(output, expected, "resident final output");
+    return {elapsed(total_start, h2d_stop), elapsed(h2d_stop, device_stop),
+            elapsed(device_stop, total_stop), elapsed(total_start, total_stop)};
+}
+
+} // namespace
+
+void validate_adaptive_cuda_transfer_modes(
+    const std::vector<double>& input,
+    const std::vector<double>& expected,
+    const phase_a::Dimensions4D& dimensions)
+{
+    validate_input(input, dimensions);
+    if (expected.size() != input.size()) throw std::invalid_argument("Expected size mismatch.");
+    PinnedHostBuffer<double> staging(input.size());
+    require_exact_output(measure_one_shot(input, dimensions, nullptr).output,
+                         expected, "pageable one-shot output");
+    require_exact_output(measure_one_shot(input, dimensions, &staging).output,
+                         expected, "pinned-staging one-shot output");
+    measure_resident(input, expected, dimensions, 2);
+}
+
+AdaptiveTransferExperimentResult benchmark_adaptive_cuda_transfer_residency(
+    const std::vector<double>& input,
+    const std::vector<double>& expected,
+    const phase_a::Dimensions4D& dimensions,
+    std::size_t one_shot_runs,
+    std::size_t transfer_pair_runs,
+    std::size_t resident_sequence_runs,
+    const std::vector<std::size_t>& resident_repetition_counts)
+{
+    validate_input(input, dimensions);
+    if (expected.size() != input.size() || one_shot_runs < 7 ||
+        transfer_pair_runs < 7 || resident_sequence_runs < 5 ||
+        resident_repetition_counts.empty()) {
+        throw std::invalid_argument("Transfer benchmark requires valid reference and run counts.");
+    }
+    AdaptiveTransferExperimentResult result;
+    const std::size_t count = input.size();
+    const std::size_t plane_count = dimensions.detector_y * dimensions.detector_x;
+    const std::size_t bytes = count * sizeof(double);
+    result.input_device_bytes = bytes;
+    result.output_device_bytes = bytes;
+    result.plane_minima_device_bytes = plane_count * sizeof(double);
+    result.fallback_flags_device_bytes = count;
+    const auto pin_start = HostClock::now();
+    PinnedHostBuffer<double> staging(count);
+    result.pinned_buffer_allocation_ms = host_milliseconds(pin_start, HostClock::now());
+
+    // Warm both one-shot paths before alternating the timed order.
+    for (int warmup = 0; warmup < 2; ++warmup) {
+        require_exact_output(measure_one_shot(input, dimensions, nullptr).output,
+                             expected, "pageable warm-up output");
+        require_exact_output(measure_one_shot(input, dimensions, &staging).output,
+                             expected, "pinned warm-up output");
+    }
+    const auto time_one_shot = [&](bool pinned) {
+        auto measured = measure_one_shot(input, dimensions, pinned ? &staging : nullptr);
+        require_exact_output(measured.output, expected,
+                             pinned ? "pinned one-shot output" : "pageable one-shot output");
+        (pinned ? result.pinned_staging_one_shot : result.pageable_one_shot)
+            .push_back(measured.timing);
+    };
+    for (std::size_t run = 0; run < one_shot_runs; ++run) {
+        time_one_shot(run % 2 != 0);
+        time_one_shot(run % 2 == 0);
+    }
+
+    // Transfer-only pairs reuse one device buffer. Recopy to staging outside
+    // the event interval because each D2H overwrites the pinned input bytes.
+    DeviceBuffer<double> transfer_device(count);
+    std::vector<double> pageable_output(count);
+    Event start;
+    Event middle;
+    Event stop;
+    const auto time_transfer = [&](bool pinned) {
+        if (pinned) std::memcpy(staging.get(), input.data(), bytes);
+        record(start, "transfer before H2D");
+        check_cuda(cudaMemcpy(transfer_device.get(), pinned ? staging.get() : input.data(),
+                              bytes, cudaMemcpyHostToDevice), "transfer-only H2D");
+        record(middle, "transfer after H2D");
+        check_cuda(cudaMemcpy(pinned ? staging.get() : pageable_output.data(),
+                              transfer_device.get(), bytes, cudaMemcpyDeviceToHost),
+                   "transfer-only D2H");
+        record(stop, "transfer after D2H");
+        check_cuda(cudaEventSynchronize(stop.get()), "transfer-only synchronization");
+        if (std::memcmp(pinned ? staging.get() : pageable_output.data(), input.data(), bytes) != 0) {
+            throw std::runtime_error("Transfer-only round trip changed input bits.");
+        }
+        return std::array<double, 2>{elapsed(start, middle), elapsed(middle, stop)};
+    };
+    for (int warmup = 0; warmup < 3; ++warmup) {
+        time_transfer(false);
+        time_transfer(true);
+    }
+    for (std::size_t run = 0; run < transfer_pair_runs; ++run) {
+        std::array<double, 2> pageable{};
+        std::array<double, 2> pinned{};
+        if (run % 2 == 0) {
+            pageable = time_transfer(false);
+            pinned = time_transfer(true);
+        }
+        else {
+            pinned = time_transfer(true);
+            pageable = time_transfer(false);
+        }
+        result.transfer_pairs.push_back({pageable[0], pinned[0], pageable[1], pinned[1]});
+    }
+
+    const auto pin_free_start = HostClock::now();
+    staging.release();
+    result.pinned_buffer_free_ms = host_milliseconds(pin_free_start, HostClock::now());
+    transfer_device.release();
+    std::vector<double>().swap(pageable_output);
+
+    result.resident.reserve(resident_repetition_counts.size());
+    for (const std::size_t repetitions : resident_repetition_counts) {
+        if (repetitions == 0) throw std::invalid_argument("Resident repetition count is zero.");
+        result.resident.push_back({repetitions, {}});
+    }
+    for (std::size_t sequence = 0; sequence < resident_sequence_runs; ++sequence) {
+        for (std::size_t offset = 0; offset < result.resident.size(); ++offset) {
+            const std::size_t index = (offset + sequence) % result.resident.size();
+            auto& series = result.resident[index];
+            series.samples.push_back(
+                measure_resident(input, expected, dimensions, series.repetition_count));
+        }
+    }
+    return result;
+}
+
+} // namespace detail
 
 } // namespace phase_b

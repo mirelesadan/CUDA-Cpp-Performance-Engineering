@@ -2,7 +2,7 @@
 
 This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phase A is complete**, having taken a four-dimensional fixed median from an authoritative Python/4Denoise contract through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B now has an exact native adaptive-median baseline, three retained serial optimizations, portable OpenMP, and a profiled CUDA implementation with a retained split common path.
 
-The retained Phase B split CUDA path now includes a measured balanced nine-value min/max candidate. The next technical milestone is an isolated median-network dependency experiment. Projects 2–4 remain planned work.
+The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization is complete; the next technical milestone is persistent adaptive CUDA ownership for Python. Projects 2–4 remain planned work.
 
 ## Current status
 
@@ -32,7 +32,9 @@ The retained Phase B split CUDA path now includes a measured balanced nine-value
 | Phase B split common-path CUDA | Complete | Right-sized the 99.85% common `3 × 3` path; combined adaptive time fell repeatably by 22–23% with exact semantics |
 | Phase B split-kernel profiling | Complete | Nsight Compute found L1TEX-queue and short-scoreboard stalls in the common kernel despite high occupancy and no compiled local-memory traffic |
 | Phase B min/max reduction experiment | Complete | Exact balanced reduction retained after repeatable ~7–9% common-kernel gains despite lower occupancy |
-| Phase B median-network experiment | **Next** | Test the remaining compare/swap dependency chain independently |
+| Phase B median-network experiment | Complete; rejected | Exact candidate regressed common-kernel time by 5.23%; retained selector unchanged |
+| Phase B adaptive CUDA transfers/residency | Complete | Pageable/pinned one-shot paths and repeated full-device operations measured with exact outputs |
+| Phase B persistent adaptive Python CUDA owner | Next | Expose deliberate device residency without changing the retained kernels |
 | Projects 2–4 | Planned | Problem statements and validation/performance questions only |
 
 ## Project 1 Phase A results
@@ -76,7 +78,9 @@ Python reference
   → Phase B split common-path CUDA [complete]
   → Phase B split-kernel profiling [complete]
   → Phase B min/max reduction experiment [complete]
-  → Phase B median-network experiment [next]
+  → Phase B median-network experiment [complete; rejected]
+  → Phase B CUDA transfer/residency characterization [complete]
+  → Phase B persistent adaptive Python ownership [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -92,6 +96,8 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
                                  tested selector primitive and internal experiment hooks
         include/adaptive_median_cuda.hpp
                                  Phase B CUDA API and timing result types
+        include/adaptive_median_cuda_transfer_experiment.hpp
+                                 internal Phase B transfer/residency measurements
         include/fixed_median_cuda.hpp
                                  CUDA interface, RAII owner, and timing result types
         src/fixed_median_cuda.cu baseline kernel, one-shot path, and resident buffers
@@ -108,9 +114,11 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
         src/adaptive_validation.cpp
                                  public exact Phase B validation executable
         src/adaptive_median_cuda.cu
-                                 two-stage correctness-first adaptive CUDA baseline
+                                 adaptive baseline, retained split/balanced kernels, and internal transfer study
         src/adaptive_cuda_validation.cpp / adaptive_cuda_benchmark.cpp
                                  exact adaptive CUDA validation and timing harnesses
+        src/adaptive_cuda_transfer_characterization.cpp
+                                 native pageable/pinned/resident adaptive CUDA study
     reference_data/public_adaptive/
                                  public deterministic adaptive branch fixture
     reference_data/public_synthetic/

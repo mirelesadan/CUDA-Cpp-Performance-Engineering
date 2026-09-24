@@ -238,6 +238,11 @@ if(PHASE_A_ENABLE_CUDA)
         src/adaptive_median.cpp
         src/fixed_median.cpp
     )
+    add_executable(phase_b_cuda_transfer
+        src/adaptive_cuda_transfer_characterization.cpp
+        src/adaptive_median.cpp
+        src/fixed_median.cpp
+    )
 
     foreach(cuda_target IN ITEMS
             phase_a_cuda_validation
@@ -263,7 +268,8 @@ if(PHASE_A_ENABLE_CUDA)
 
     foreach(adaptive_cuda_target IN ITEMS
             phase_b_adaptive_cuda_validation
-            phase_b_adaptive_cuda_benchmark)
+            phase_b_adaptive_cuda_benchmark
+            phase_b_cuda_transfer)
         target_include_directories(${adaptive_cuda_target}
             PRIVATE
                 "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -306,6 +312,14 @@ if(PHASE_A_ENABLE_CUDA)
     target_compile_definitions(phase_b_adaptive_cuda_benchmark
         PRIVATE
             PHASE_B_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
+    )
+    target_compile_definitions(phase_b_cuda_transfer
+        PRIVATE
+            PHASE_B_BENCHMARK_INPUT_PATH="${PHASE_A_BENCHMARK_INPUT_PATH}"
+            PHASE_B_REFERENCE_INPUT_PATH="${PHASE_B_REFERENCE_INPUT_PATH}"
+            PHASE_B_REFERENCE_OUTPUT_PATH="${PHASE_B_REFERENCE_OUTPUT_PATH}"
+            PHASE_B_LOCAL_REFERENCE_INPUT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../reference_data/adaptive_median/reference_input.npy"
+            PHASE_B_LOCAL_REFERENCE_OUTPUT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../reference_data/adaptive_median/reference_output_python.npy"
     )
 endif()
 
