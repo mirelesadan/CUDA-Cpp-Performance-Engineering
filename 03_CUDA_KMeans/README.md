@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. This milestone freezes the Python semantics and public fixtures only; it does not benchmark or implement native code.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract and straightforward serial C++ baseline are complete; optimization has not begun.
 
 ## Why this project exists
 
@@ -35,9 +35,25 @@ The capped case uses a private reduced-update test hook, not a public fit parame
 
 Run the [self-tests](python/test_reference.py) from the repository root with `python -B 03_CUDA_KMeans/python/test_reference.py`. They check the frozen expected outputs, seed indices, ties, ordered FP32 arithmetic, immutability, deterministic repeatability, independent output ownership, invalid input rejection, and fixture schema/contract version. Verified locally with Python 3.12.7 and NumPy 1.26.4.
 
+## Correctness-first serial C++ baseline
+
+The standalone [C++17 implementation](cpp/src/kmeans_serial.cpp) accepts an unchanged row-major `std::vector<float>` plus `(N,D,K)` and returns independently owned `std::vector<std::int32_t>` labels, `std::vector<float>` centroids, update count, and convergence flag. It follows the reference's visibly separate phases: validate, copy deterministic seed rows, assign, accumulate/update, reassign, and test label stability. The baseline deliberately uses nested scalar loops, with no OpenMP, CUDA, SIMD, blocking, or fused stages. A test-only reduced-cap entry point exercises the nonconverged return state; the normal API always allows 100 passes.
+
+Assignment uses separate `float` subtraction, multiplication, and addition in ascending feature order; strict less-than comparison preserves lowest-index ties. MSVC Release builds use `/O2` and explicitly `/fp:precise` without fast-math or FP contraction. Centroid sums visit samples in order as `double`, divide in `double`, and cast once to `float`; empty centroids are copied unchanged. This has been validated on Windows/MSVC, not Linux.
+
+From the repository root, configure with `cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build -G "Visual Studio 17 2022" -A x64`, then build with `cmake --build 03_CUDA_KMeans/cpp/build --config Release`. Run the native contract test with `ctest --test-dir 03_CUDA_KMeans/cpp/build -C Release --output-on-failure`. Run the [fixture driver](python/test_cpp_serial.py) with `python -B 03_CUDA_KMeans/python/test_cpp_serial.py 03_CUDA_KMeans/cpp/build/Release/phase2_kmeans_serial.exe`; add `--benchmark` for the controlled baseline timing. Temporary raw-FP32 files bridge tests to the executable; this is not a Python binding. Project 2's CMake build has no Project 1, OpenMP, CUDA, or Python dependency.
+
+All six public fixtures passed: 96/96 labels exact, 0 centroid bit mismatches, identical update counts and convergence flags, and passing independently recomputed inertia. This includes the FP32-versus-FP64 assignment discriminator and the test-only one-pass nonconvergence case. Native checks cover seed indices, invalid inputs, input immutability, independent result storage, and deterministic repeated runs. The existing Python self-tests (12), Project 1 smoke test, and Project 1 public fixed-median validation also passed.
+
+### Initial whole-fit timing—not a profile
+
+The [version-1 `profiling` generator](python/benchmark_data.py) produced `(N,D,K)=(65,536,8,16)` with PCG64 seed `20260924`. On this Windows/MSVC x64 Release build, the input was generated and loaded before timing. One untimed warm-up preceded seven `std::chrono::steady_clock` complete-fit calls; each includes normal validation and algorithm/output allocations, but excludes the raw-file bridge. Native times (ms): `10.234200, 9.846900, 9.732000, 9.769400, 9.836700, 10.043400, 10.112700`; min/median/max: `9.732000 / 9.846900 / 10.234200`. The fit converged after one update: `6.655` million samples/s and `212.976` million sample-cluster distance evaluations/s, counting the initial assignment and one reassignment. Full-workload labels, count, flag, and centroids matched the Python reference exactly.
+
+For context only, the NumPy semantic reference took `30.920000, 31.565800, 29.956200` ms (one warm-up, three Python-call wall timings; median `30.920000` ms) on the same input. No profiling or optimization was performed; profiling the native baseline is next.
+
 ## Planned workflow
 
-The reference and correctness cases are complete. Next: implement a clear serial C++ baseline, validate against these cases, then benchmark/profile CPU phases, add OpenMP and correctness-first CUDA, and let profiling drive GPU optimizations. Python integration and library comparisons come after the native behavior is trustworthy.
+Next: profile the straightforward serial baseline, then use evidence to choose isolated CPU changes before OpenMP and correctness-first CUDA. Python integration and library comparisons come after the native behavior is trustworthy.
 
 ## Primary learning goals
 
@@ -63,7 +79,7 @@ The deterministic seed order removes arbitrary label permutations from our own i
 
 ## Benchmarking strategy
 
-No timings are claimed yet. The [version-1 seeded generator](python/benchmark_data.py) defines these future workloads:
+The initial profiling-size whole-fit timing is reported above; broader size/stage scaling has not begun. The [version-1 seeded generator](python/benchmark_data.py) defines these workloads:
 
 | Name | `(N,D,K)` | PCG64 seed |
 | --- | --- | ---: |
@@ -75,10 +91,10 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Next active project. Authoritative Python reference and deterministic correctness fixtures complete; native implementation and benchmarking have not begun. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, and correctness-first serial C++ baseline complete; native profiling and optimization have not begun. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
-- **TBD:** Measured reference/native size and stage-scaling results; no benchmark campaign has begun.
+- **TBD:** Native baseline profiling and broader size/stage-scaling results; the timing above is one initial whole-fit workload only.
 - **TBD:** Profile-driven CUDA mapping, reduction, layout, and fusion decisions.
 - **TBD:** Availability and fair configuration of external libraries; binding approach.

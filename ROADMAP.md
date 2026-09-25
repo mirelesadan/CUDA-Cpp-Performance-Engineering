@@ -321,9 +321,10 @@ All projects currently live in this public parent portfolio, and future work sho
 
 - [x] Define the first deterministic scope, algorithm, and validation contract
 - [x] Create the authoritative NumPy reference and public deterministic fixtures
-- [ ] Implement and validate straightforward C++
-- [ ] Benchmark/profile the reference and native baseline on the moderate public workload
-- [ ] Benchmark, profile, and optimize CPU phases
+- [x] Implement and validate straightforward serial C++
+- [x] Establish initial native/Python whole-fit timing on the moderate public workload
+- [ ] Profile the serial C++ baseline on the moderate public workload
+- [ ] Optimize CPU phases in response to measured bottlenecks
 - [ ] Implement and validate initial CUDA
 - [ ] Profile CUDA and optimize measured assignment/update bottlenecks
 - [ ] Analyze transfer, iteration, residency, and CPU/GPU crossover costs
