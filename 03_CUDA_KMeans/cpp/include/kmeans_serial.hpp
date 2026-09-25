@@ -54,4 +54,16 @@ Result kmeans_serial_addressed_with_update_cap(const std::vector<float>& input,
                                                std::size_t k,
                                                std::size_t max_updates);
 
+// Available when PROJECT2_ENABLE_OPENMP is enabled. Each assignment pass
+// divides independent sample rows among an explicit number of OpenMP threads;
+// centroid accumulation and convergence control remain serial and ordered.
+Result kmeans_openmp(const std::vector<float>& input, std::size_t n,
+                     std::size_t d, std::size_t k, int thread_count);
+
+// Test-only reduced-cap equivalent for the frozen nonconvergence fixture.
+Result kmeans_openmp_with_update_cap(const std::vector<float>& input,
+                                     std::size_t n, std::size_t d,
+                                     std::size_t k, std::size_t max_updates,
+                                     int thread_count);
+
 }  // namespace kmeans

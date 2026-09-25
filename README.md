@@ -2,7 +2,7 @@
 
 This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phases A and B are complete** for their established finite-`float64` Windows contracts. Phase A took a four-dimensional fixed median from an authoritative Python/4Denoise reference through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B extended that process to adaptive median filtering, ending with validated persistent adaptive CUDA ownership for Python.
 
-The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means: its Python reference, serial C++ baseline, native profile, and first measured assignment-addressing improvement are complete. A two-feature distance-pipeline candidate regressed and was discarded; portable OpenMP is next. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
+The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means: its Python reference, serial C++ baseline, native profile, measured assignment-addressing improvement, and assignment-only OpenMP scaling are complete. A two-feature distance-pipeline candidate regressed and was discarded; correctness-first K-means CUDA is next. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
 
 ## Current status
 
@@ -36,7 +36,7 @@ The retained Phase B split CUDA path includes a measured balanced nine-value min
 | Phase B adaptive CUDA transfers/residency | Complete | Pageable/pinned one-shot paths and repeated full-device operations measured with exact outputs |
 | Phase B persistent adaptive Python CUDA owner | Complete | Exact public/local/subset/canonical outputs; 20 resident Python calls reached 28.221 ms/filter |
 | Phase B closeout | Complete | Reference, native CPU/OpenMP, profiled CUDA, transfer study, and Python workflow validated together |
-| Project 2 — K-means | Serial checkpoint complete; OpenMP next | Addressing reduced primary whole-fit time by ~6%; exact distance-pipeline candidate regressed and was rejected |
+| Project 2 — K-means | OpenMP assignment scaling complete; CUDA next | Exact serial updates retained; eight threads reached `4.133×` versus fresh addressed serial in one controlled primary sequence, with material laptop timing drift |
 | Project 3 — matrix/tensor multiplication | Planned | Operation and validation details remain TBD |
 | 3D-median concept | Deferred | Revisit only if a distinct scientific transformation and new performance question are established |
 
@@ -92,7 +92,8 @@ Python reference
   → Project 2 native CPU profiling [complete]
   → Project 2 isolated assignment-addressing experiment [complete]
   → Project 2 ordered distance-loop experiment [complete; rejected]
-  → Project 2 portable OpenMP CPU [next]
+  → Project 2 assignment-only portable OpenMP CPU [complete]
+  → Project 2 correctness-first CUDA [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
@@ -142,7 +143,7 @@ The work follows a controlled loop: define numerical behavior, validate exactly,
                                  adaptive Python owner correctness and timing
     *.ipynb                      output-cleared scientific reference notebooks
 02_4DSTEM_3D_Median_Filter/      deferred concept; legacy directory prefix
-03_CUDA_KMeans/                  active Project 2; Python oracle, public workloads, serial C++ control/candidate/profiler; legacy prefix
+03_CUDA_KMeans/                  active Project 2; Python oracle, public workloads, serial/OpenMP C++ paths and scaling harness; legacy prefix
 04_CUDA_Matrix_Multiplication/   planned Project 3; legacy directory prefix
 ROADMAP.md                       staged development plan and completion state
 ```

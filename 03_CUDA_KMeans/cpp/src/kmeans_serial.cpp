@@ -136,9 +136,26 @@ std::vector<float> update(const std::vector<float>& input,
 
 }  // namespace
 
+namespace detail {
+// Internal cross-translation-unit bridge: the OpenMP fit reuses the exact
+// existing serial centroid update, rather than maintaining a second copy.
+std::vector<float> update_serial(const std::vector<float>& input,
+                                 const std::vector<std::int32_t>& labels,
+                                 const std::vector<float>& previous,
+                                 std::size_t n, std::size_t d, std::size_t k) {
+    return update(input, labels, previous, n, d, k);
+}
+}  // namespace detail
+
 #ifdef KMEANS_PHASE_TIMING
 PhaseTimings last_phase_timings() {
     return recorded_phases;
+}
+
+// The separate OpenMP translation unit records into the same profiling-only
+// slot, so one accessor reports the last fit regardless of implementation.
+void record_phase_timings(const PhaseTimings& phases) {
+    recorded_phases = phases;
 }
 #endif
 
@@ -225,7 +242,15 @@ Result kmeans_serial_addressed_with_update_cap(const std::vector<float>& input,
                                                std::size_t n, std::size_t d,
                                                std::size_t k,
                                                std::size_t max_updates) {
+#ifdef KMEANS_PHASE_TIMING
+    PhaseTimings phases;
+    auto phase_start = ProfileClock::now();
+#endif
     validate(input, n, d, k, max_updates);
+#ifdef KMEANS_PHASE_TIMING
+    phases.validation_ms += elapsed_ms(phase_start, ProfileClock::now());
+    phase_start = ProfileClock::now();
+#endif
     std::vector<float> centroids(k * d);
     const auto seed_rows = initial_row_indices(n, k);
     for (std::size_t cluster = 0; cluster < k; ++cluster) {
@@ -233,17 +258,47 @@ Result kmeans_serial_addressed_with_update_cap(const std::vector<float>& input,
             centroids[cluster * d + feature] = input[seed_rows[cluster] * d + feature];
         }
     }
+#ifdef KMEANS_PHASE_TIMING
+    phases.initialization_ms += elapsed_ms(phase_start, ProfileClock::now());
+    phase_start = ProfileClock::now();
+#endif
     auto labels = assign_addressed(input, centroids, n, d, k);
+#ifdef KMEANS_PHASE_TIMING
+    phases.initial_assignment_ms += elapsed_ms(phase_start, ProfileClock::now());
+    phases.assignment_passes = 1;
+#endif
     for (std::size_t pass = 1; pass <= max_updates; ++pass) {
+#ifdef KMEANS_PHASE_TIMING
+        phase_start = ProfileClock::now();
+#endif
         auto next_centroids = update(input, labels, centroids, n, d, k);
+#ifdef KMEANS_PHASE_TIMING
+        phases.centroid_update_ms += elapsed_ms(phase_start, ProfileClock::now());
+        ++phases.centroid_updates;
+        phase_start = ProfileClock::now();
+#endif
         auto next_labels = assign_addressed(input, next_centroids, n, d, k);
+#ifdef KMEANS_PHASE_TIMING
+        phases.reassignment_ms += elapsed_ms(phase_start, ProfileClock::now());
+        ++phases.assignment_passes;
+        phase_start = ProfileClock::now();
+#endif
         const bool converged = next_labels == labels;
+#ifdef KMEANS_PHASE_TIMING
+        phases.convergence_check_ms += elapsed_ms(phase_start, ProfileClock::now());
+#endif
         centroids = std::move(next_centroids);
         labels = std::move(next_labels);
         if (converged) {
+#ifdef KMEANS_PHASE_TIMING
+            recorded_phases = phases;
+#endif
             return {std::move(labels), std::move(centroids), pass, true};
         }
     }
+#ifdef KMEANS_PHASE_TIMING
+    recorded_phases = phases;
+#endif
     return {std::move(labels), std::move(centroids), max_updates, false};
 }
 

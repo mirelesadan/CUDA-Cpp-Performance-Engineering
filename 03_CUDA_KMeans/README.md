@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, straightforward serial C++ baseline, CPU profile, and first retained addressing optimization are complete.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, and assignment-only OpenMP scaling are complete; CUDA is next.
 
 ## Why this project exists
 
@@ -41,7 +41,7 @@ The standalone [C++17 implementation](cpp/src/kmeans_serial.cpp) accepts an unch
 
 Assignment uses separate `float` subtraction, multiplication, and addition in ascending feature order; strict less-than comparison preserves lowest-index ties. MSVC Release builds use `/O2` and explicitly `/fp:precise` without fast-math or FP contraction. Centroid sums visit samples in order as `double`, divide in `double`, and cast once to `float`; empty centroids are copied unchanged. This has been validated on Windows/MSVC, not Linux.
 
-From the repository root, configure with `cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build -G "Visual Studio 17 2022" -A x64`, then build with `cmake --build 03_CUDA_KMeans/cpp/build --config Release`. Run the native contract test with `ctest --test-dir 03_CUDA_KMeans/cpp/build -C Release --output-on-failure`. Run the [fixture driver](python/test_cpp_serial.py) with `python -B 03_CUDA_KMeans/python/test_cpp_serial.py 03_CUDA_KMeans/cpp/build/Release/phase2_kmeans_serial.exe`; add `--benchmark` for the controlled baseline timing. Temporary raw-FP32 files bridge tests to the executable; this is not a Python binding. Project 2's CMake build has no Project 1, OpenMP, CUDA, or Python dependency.
+From the repository root, configure with `cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build -G "Visual Studio 17 2022" -A x64`, then build with `cmake --build 03_CUDA_KMeans/cpp/build --config Release`. Run the native contract test with `ctest --test-dir 03_CUDA_KMeans/cpp/build -C Release --output-on-failure`. Run the [fixture driver](python/test_cpp_serial.py) with `python -B 03_CUDA_KMeans/python/test_cpp_serial.py 03_CUDA_KMeans/cpp/build/Release/phase2_kmeans_serial.exe`; add `--benchmark` for the controlled baseline timing. Temporary raw-FP32 files bridge tests to the executable; this is not a Python binding. Project 2's default CMake build has no Project 1, OpenMP, CUDA, or Python dependency; OpenMP is separately opt-in below.
 
 All six public fixtures passed: 96/96 labels exact, 0 centroid bit mismatches, identical update counts and convergence flags, and passing independently recomputed inertia. This includes the FP32-versus-FP64 assignment discriminator and the test-only one-pass nonconvergence case. Native checks cover seed indices, invalid inputs, input immutability, independent result storage, and deterministic repeated runs. The Python self-tests (13, including iterative-generator reproducibility) and native contract test pass; the prior Project 1 regressions remain unchanged.
 
@@ -114,11 +114,58 @@ The normal MSVC x64 Release (`/O2 /fp:precise`) paired harness warmed both paths
 
 Pooled min/median/max was `9.1939/9.4789/10.1949` ms for the addressed control and `10.4678/10.5889/11.2471` ms for the pipeline: control/candidate speedup `0.895173×`, or **11.7102% longer runtime**. Candidate throughput was `6.1891` million samples/s and `198.0519` million sample-cluster distance evaluations/s, versus `6.9139` and `221.2442` for the control. On the 22-update diagnostic, three five-pair blocks gave pooled `16.3654/17.7841` ms control/candidate (`0.920226×`, 8.6689% longer); every block favored the control. These are fresh same-session comparisons only. Absolute control time again shifted relative to earlier sessions, so historical medians are not used for a speedup claim.
 
-A small optimized-object check found scalar FP32 subtraction, multiplication, and additions in the required order, a scalar odd tail, strict cluster selection, and no FMA or reassociated reduction. MSVC had already unrolled/prepared **four** features per loop in the addressed control; the candidate emitted a distinct **two**-feature loop. This is consistent with, but does not independently prove, the measured regression. The candidate source/test/harness changes were discarded; no new sampling profile was warranted. Cluster-selection bookkeeping remains a smaller ~9% sampled opportunity, but its likely ceiling is too small to justify another serial micro-optimization now. **Next step: portable OpenMP decomposition**, with the retained addressed serial path as control.
+A small optimized-object check found scalar FP32 subtraction, multiplication, and additions in the required order, a scalar odd tail, strict cluster selection, and no FMA or reassociated reduction. MSVC had already unrolled/prepared **four** features per loop in the addressed control; the candidate emitted a distinct **two**-feature loop. This is consistent with, but does not independently prove, the measured regression. The candidate source/test/harness changes were discarded; no new sampling profile was warranted. Cluster-selection bookkeeping remains a smaller ~9% sampled opportunity, whose likely ceiling did not justify another serial micro-optimization. This selected the portable OpenMP experiment below, with the retained addressed serial path as control.
+
+### Assignment-only portable OpenMP scaling
+
+The opt-in `kmeans_openmp(input, N, D, K, thread_count)` path statically partitions independent sample indices for **each** assignment. Each worker keeps the addressed serial path's sample/centroid row pointers, ascending cluster and feature order, separate FP32 subtract/square/ordered add, and strict `<` tie rule. The path calls the **same existing serial centroid-update function** after every assignment, so FP64 sample-order sums, empty-cluster retention, convergence checks, and update counts are not parallel reductions. Dynamic OpenMP teams are disabled for the call and the actual team size is checked; the prior runtime setting is restored. CMake discovers `OpenMP::OpenMP_CXX` only when `PROJECT2_ENABLE_OPENMP=ON` (default `OFF`); normal Release uses MSVC `/O2 /fp:precise`, and GCC/Clang use `-ffp-contract=off`. Linux compilation/scaling has not yet been validated.
+
+All six authoritative public fixtures passed at 1, 2, 4, 8, 16, and 20 threads: 96 exact labels, zero centroid-bit mismatches, and identical update counts/convergence flags versus the retained addressed serial path. The reduced-cap nonconvergence and FP32-sensitive cases passed; an additional native D=3 ordered-addition discriminator, invalid-input/thread-count checks, input immutability, independent outputs, and repeated calls passed. Both benchmark workloads matched the addressed control bit for bit at every tested count. The default CPU-only build, its native test, the opt-in OpenMP native tests, and Project 1's public Phase A/B regression executables passed.
+
+On the 14-core/20-logical-processor i7-13700H, OpenMP exposed 20 processors and a 20-thread maximum; the runtime supplied each requested team size. Static sample chunks differ by at most one row (at 20 threads: 3,276–3,277 primary rows or 819–820 iterative rows). Python generates the input and the normal x64 Release executable loads it before timing, warms each configuration once, then rotates serial and six OpenMP configurations through seven `steady_clock` whole-fit rounds. Fit validation/output allocations are included; file I/O and exact comparisons are excluded. Throughput uses `N / fit_time` samples/s and `N × K × (1 + update_count) / fit_time` sample-cluster distance evaluations/s. The following is one complete controlled sequence; all times are milliseconds and the serial denominator is fresh in that sequence.
+
+| Primary `(65,536,8,16)`, one update | Seven raw fits (ms) | Min / median / max | Speedup | Efficiency | Msamples/s | Mdistances/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Addressed serial | 19.4941, 26.7399, 31.9212, 32.5697, 29.2342, 28.0908, 24.0578 | 19.4941 / 28.0908 / 32.5697 | 1.000× | — | 2.3330 | 74.6562 |
+| OpenMP-1 | 18.3983, 19.0673, 27.7629, 23.6298, 23.3964, 21.2478, 19.9020 | 18.3983 / 21.2478 / 27.7629 | 1.322× | 1.322 | 3.0844 | 98.6997 |
+| OpenMP-2 | 9.2508, 9.9236, 13.1254, 12.4319, 12.6980, 10.6050, 9.9887 | 9.2508 / 10.6050 / 13.1254 | 2.649× | 1.324 | 6.1797 | 197.7512 |
+| OpenMP-4 | 6.6232, 7.4427, 8.9850, 10.6029, 9.6181, 6.6294, 5.8487 | 5.8487 / 7.4427 / 10.6029 | 3.774× | 0.944 | 8.8054 | 281.7730 |
+| OpenMP-8 | 5.6924, 5.5919, 8.5685, 8.8671, 7.1609, 6.5468, 6.7966 | 5.5919 / **6.7966** / 8.8671 | **4.133×** | 0.517 | **9.6425** | **308.5590** |
+| OpenMP-16 | 7.8467, 5.4740, 7.6373, 9.9954, 7.5209, 7.4636, 5.9488 | 5.4740 / 7.5209 / 9.9954 | 3.735× | 0.233 | 8.7139 | 278.8432 |
+| OpenMP-20 | 6.9675, 6.6148, 7.9501, 13.4985, 7.8722, 11.9601, 15.3213 | 6.6148 / 7.9501 / 15.3213 | 3.533× | 0.177 | 8.2434 | 263.7894 |
+
+The 22-update diagnostic `(16,384,8,8)` produced 23 assignment passes. It is not a replacement for the official primary benchmark:
+
+| Iterative diagnostic | Seven raw fits (ms) | Min / median / max | Speedup | Efficiency | Msamples/s | Mdistances/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Addressed serial | 28.2629, 46.0209, 47.2611, 49.5545, 48.3039, 50.4658, 40.5103 | 28.2629 / 47.2611 / 50.4658 | 1.000× | — | 0.3467 | 63.7873 |
+| OpenMP-1 | 23.3444, 28.2831, 38.1574, 36.2447, 35.3213, 34.7804, 32.5662 | 23.3444 / 34.7804 / 38.1574 | 1.359× | 1.359 | 0.4711 | 86.6769 |
+| OpenMP-2 | 13.5077, 15.3685, 20.6043, 17.7045, 19.6880, 18.7388, 17.4515 | 13.5077 / 17.7045 / 20.6043 | 2.669× | 1.335 | 0.9254 | 170.2763 |
+| OpenMP-4 | 9.0004, 12.4797, 12.8184, 12.2889, 15.1445, 11.8797, 10.6626 | 9.0004 / **12.2889** / 15.1445 | **3.846×** | 0.961 | **1.3332** | **245.3154** |
+| OpenMP-8 | 8.9495, 13.4263, 12.0619, 13.3460, 12.8406, 13.8901, 12.6334 | 8.9495 / 12.8406 / 13.8901 | 3.681× | 0.460 | 1.2760 | 234.7753 |
+| OpenMP-16 | 15.2107, 13.0860, 13.3786, 12.7381, 15.0289, 14.3010, 12.6073 | 12.6073 / 13.3786 / 15.2107 | 3.533× | 0.221 | 1.2246 | 225.3342 |
+| OpenMP-20 | 13.2437, 17.8102, 14.3791, 15.7043, 14.8532, 15.9377, 18.9370 | 13.2437 / 15.7043 / 18.9370 | 3.009× | 0.150 | 1.0433 | 191.9637 |
+
+A bounded second normal-Release sequence confirmed the multicore benefit despite substantial laptop timing drift: primary serial/OpenMP-1/4/8/16/20 medians were `23.7479/19.3620/5.8780/5.8367/6.0609/6.7084` ms; iterative medians were `44.6436/33.6416/11.1317/10.4071/12.6211/13.2583` ms. Eight threads had the lowest primary median in both sequences; four and eight were nearly tied in the primary confirmation. OpenMP-1 ran 24.4% faster than serial in the first primary sequence and 18.5% faster in confirmation, so no one-thread framework penalty is visible. That improvement is **not** credited to parallelism: different compiler loop code generation and host variability have not been separated.
+
+Coarse phase timers were enabled only in a separate Release build, not the speedup build; medians below are directional, and independently computed phase medians do not need to sum to whole-fit medians.
+
+| Workload / path | Whole fit | Assignment | Serial centroid update | Update share |
+| --- | ---: | ---: | ---: | ---: |
+| Primary serial | 20.6935 ms | 18.9981 ms | 0.5492 ms | 2.7% |
+| Primary OpenMP-8 | 5.6322 | 4.3742 | 0.3388 | 6.0% |
+| Primary OpenMP-16 | 5.0777 | 3.7641 | 0.5222 | 10.3% |
+| Iterative serial | 39.8555 | 36.0765 | 3.4305 | 8.6% |
+| Iterative OpenMP-8 | 9.9627 | 7.4784 | 2.0292 | 20.4% |
+| Iterative OpenMP-16 | 11.4459 | 7.9310 | 3.0170 | 26.4% |
+
+Assignment still consumes about 69–78% of phase-timed fits at higher thread counts. Repeated serial updates become a meaningful ceiling in the iterative case but are not the sole or dominant scaling limit; 16–20 threads also show worse/noisy whole-fit results. Equal-size static chunks make sample-count imbalance unlikely, while hybrid-core scheduling, cache/memory effects, and repeated parallel-region overhead remain plausible but unmeasured. This readable CPU path is retained; the next portfolio experiment is a correctness-first CUDA K-means baseline, **not** a numerically risky parallel centroid reduction with limited primary-workload upside.
+
+Reproduce with `cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build -DPROJECT2_ENABLE_OPENMP=ON` (add the appropriate platform generator/Release selection), then build Release and run CTest plus `python -B 03_CUDA_KMeans/python/benchmark_openmp.py PATH_TO_SCALING_EXE fixtures`, `profiling`, or `iterative_profile`. The driver defaults to this machine's 1/2/4/8/16/20 counts and accepts `--counts` for other hosts. A separate ignored build with `-DPROJECT2_ENABLE_PHASE_TIMING=ON` supplies the optional `--phase-executable` comparison. Generated workloads, binaries, and timing logs are not committed.
 
 ## Planned workflow
 
-Next: implement portable OpenMP CPU decomposition against the retained addressed serial control, then proceed toward correctness-first CUDA. Python integration and library comparisons come after the native behavior is trustworthy.
+Next: implement a correctness-first CUDA K-means baseline. Python integration and library comparisons come after the native behavior is trustworthy.
 
 ## Primary learning goals
 
@@ -156,7 +203,7 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, and the retained serial address-generation optimization are complete. The subsequent distance-pipeline experiment was rejected; portable OpenMP is next. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, and assignment-only portable OpenMP scaling are complete. The two-feature distance-pipeline experiment was rejected; correctness-first CUDA is next. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
