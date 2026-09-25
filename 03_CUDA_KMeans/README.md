@@ -98,11 +98,27 @@ On the 22-update `iterative_profile` diagnostic, the first five paired baseline 
 
 A fresh symbol-only Windows main-thread sampling comparison on the primary workload collected 18,904 baseline and 15,311 candidate samples (1,500 fits each; requested 1 ms timer, observed mean intervals 2.854/3.868 ms). Assignment remained dominant at 91.11%/89.79%; FP32 distance-addition lines drew 35.81%/34.69%, square lines 3.79%/5.38%, cluster selection about 8.9% in both, and centroid update 2.02%/2.27%. The old combined address/load/subtract line drew 29.61%; candidate samples spread across the difference/load (8.67%), centroid-row setup (10.98%), and cluster-loop line (19.00%, up from 7.16%). The targeted *single line* shrank, but source remapping/inlining prevents claiming that all its former cost disappeared. Sample counts and profiler wall times are not speedup measurements; the paired unprofiled timings are the retention evidence.
 
-The addressed path is retained as a readable first CPU improvement. Remaining opportunities, ranked by measured importance and tractability, are (1) ordered FP32 distance accumulation and its dependency chain (~35% source attribution; high exact-semantics risk) and (2) cluster-minimum bookkeeping (~9%; lower potential ceiling). **Next isolated experiment:** test a two-feature software pipeline that computes adjacent differences/squares ahead, but adds their squares to one FP32 accumulator in the original feature order; reject it unless exact results and paired timings justify it. No further optimization is implemented here. Reproduce paired results with `python -B 03_CUDA_KMeans/python/benchmark_assignment_addressing.py 03_CUDA_KMeans/cpp/build/Release/phase2_kmeans_serial.exe profiling` (or `iterative_profile`); the sampler accepts `--variant addressed` through the profiling driver.
+The addressed path is retained as a readable first CPU improvement. The remaining ordered FP32 accumulation (~35% source attribution) and cluster-minimum bookkeeping (~9%) motivated the bounded scheduling experiment below. Reproduce the retained addressing comparison with `python -B 03_CUDA_KMeans/python/benchmark_assignment_addressing.py 03_CUDA_KMeans/cpp/build/Release/phase2_kmeans_serial.exe profiling` (or `iterative_profile`); the sampler accepts `--variant addressed` through the profiling driver.
+
+### Isolated serial experiment 2 — two-feature distance pipeline (rejected)
+
+An experimental candidate built on the addressed path prepared adjacent FP32 differences and squares before two **sequential, feature-ordered** additions, with a scalar odd-feature tail. It left sample/cluster order, strict selection, and centroid updates untouched. All six public fixtures passed against Python and the addressed control; native tests also covered D=1, D=2, D=3, and a D=3 ordered-addition discriminator. On the primary and 22-update workloads, every paired output matched the addressed control bit for bit, including labels, centroid bits, update count, and convergence.
+
+The normal MSVC x64 Release (`/O2 /fp:precise`) paired harness warmed both paths, then alternated call order within three seven-pair primary blocks, reversing each block's starting order. Each timed call included the complete fit and allocations, but excluded input I/O, comparisons, and output serialization. Raw primary times (ms):
+
+| Block | Addressed control: seven calls | Pipeline: seven calls | Median control/pipeline |
+| --- | --- | --- | ---: |
+| 1 | 9.4992, 9.3559, 9.2150, 9.4163, 9.3384, 9.5071, 9.6376 | 10.5082, 10.6022, 10.5334, 10.4678, 10.7023, 10.5889, 10.5979 | 9.4163 / 10.5889 |
+| 2 | 9.5800, 9.1939, 9.3373, 10.1949, 9.6801, 9.7573, 9.9032 | 10.5045, 10.6566, 10.5355, 11.2471, 10.5616, 10.4966, 10.5079 | 9.6801 / 10.5355 |
+| 3 | 9.4283, 9.4996, 9.8738, 9.4789, 9.3464, 9.3611, 9.3313 | 11.0689, 10.5822, 10.6147, 10.6389, 10.4875, 10.6201, 10.8222 | 9.4283 / 10.6201 |
+
+Pooled min/median/max was `9.1939/9.4789/10.1949` ms for the addressed control and `10.4678/10.5889/11.2471` ms for the pipeline: control/candidate speedup `0.895173×`, or **11.7102% longer runtime**. Candidate throughput was `6.1891` million samples/s and `198.0519` million sample-cluster distance evaluations/s, versus `6.9139` and `221.2442` for the control. On the 22-update diagnostic, three five-pair blocks gave pooled `16.3654/17.7841` ms control/candidate (`0.920226×`, 8.6689% longer); every block favored the control. These are fresh same-session comparisons only. Absolute control time again shifted relative to earlier sessions, so historical medians are not used for a speedup claim.
+
+A small optimized-object check found scalar FP32 subtraction, multiplication, and additions in the required order, a scalar odd tail, strict cluster selection, and no FMA or reassociated reduction. MSVC had already unrolled/prepared **four** features per loop in the addressed control; the candidate emitted a distinct **two**-feature loop. This is consistent with, but does not independently prove, the measured regression. The candidate source/test/harness changes were discarded; no new sampling profile was warranted. Cluster-selection bookkeeping remains a smaller ~9% sampled opportunity, but its likely ceiling is too small to justify another serial micro-optimization now. **Next step: portable OpenMP decomposition**, with the retained addressed serial path as control.
 
 ## Planned workflow
 
-Next: investigate the two-feature, ordered-addition software pipeline against the retained addressed path, then remeasure before later OpenMP and correctness-first CUDA. Python integration and library comparisons come after the native behavior is trustworthy.
+Next: implement portable OpenMP CPU decomposition against the retained addressed serial control, then proceed toward correctness-first CUDA. Python integration and library comparisons come after the native behavior is trustworthy.
 
 ## Primary learning goals
 
@@ -140,7 +156,7 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, and the first retained serial address-generation optimization are complete. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, and the retained serial address-generation optimization are complete. The subsequent distance-pipeline experiment was rejected; portable OpenMP is next. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 

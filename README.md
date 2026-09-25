@@ -2,7 +2,7 @@
 
 This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phases A and B are complete** for their established finite-`float64` Windows contracts. Phase A took a four-dimensional fixed median from an authoritative Python/4Denoise reference through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B extended that process to adaptive median filtering, ending with validated persistent adaptive CUDA ownership for Python.
 
-The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means: its authoritative Python reference, deterministic public fixtures, straightforward serial C++ baseline, native CPU profile, and first measured assignment-addressing improvement are complete. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
+The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means: its Python reference, serial C++ baseline, native profile, and first measured assignment-addressing improvement are complete. A two-feature distance-pipeline candidate regressed and was discarded; portable OpenMP is next. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
 
 ## Current status
 
@@ -36,7 +36,7 @@ The retained Phase B split CUDA path includes a measured balanced nine-value min
 | Phase B adaptive CUDA transfers/residency | Complete | Pageable/pinned one-shot paths and repeated full-device operations measured with exact outputs |
 | Phase B persistent adaptive Python CUDA owner | Complete | Exact public/local/subset/canonical outputs; 20 resident Python calls reached 28.221 ms/filter |
 | Phase B closeout | Complete | Reference, native CPU/OpenMP, profiled CUDA, transfer study, and Python workflow validated together |
-| Project 2 — K-means | First serial CPU improvement retained | Exact FP32/FP64 behavior; paired assignment-addressing experiment reduced primary whole-fit time by about 6% |
+| Project 2 — K-means | Serial checkpoint complete; OpenMP next | Addressing reduced primary whole-fit time by ~6%; exact distance-pipeline candidate regressed and was rejected |
 | Project 3 — matrix/tensor multiplication | Planned | Operation and validation details remain TBD |
 | 3D-median concept | Deferred | Revisit only if a distinct scientific transformation and new performance question are established |
 
@@ -91,7 +91,8 @@ Python reference
   → Project 2 straightforward serial C++ [complete]
   → Project 2 native CPU profiling [complete]
   → Project 2 isolated assignment-addressing experiment [complete]
-  → Project 2 ordered distance-loop experiment [next]
+  → Project 2 ordered distance-loop experiment [complete; rejected]
+  → Project 2 portable OpenMP CPU [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.
