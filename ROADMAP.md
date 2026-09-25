@@ -187,6 +187,8 @@ Hand-authored public fixtures (`N=16–64`, small `D`/`K`) cover lowest-index ti
 
 Use only public deterministic synthetic data: hand-authored tiny fixtures; a seeded, version-recorded moderate `(N,D,K)=(65,536,8,16)` profiling workload; and `(262,144,16,16)` plus an optional `(1,048,576,32,32)` GPU-scale stress workload, all defined by the [public generator](03_CUDA_KMeans/python/benchmark_data.py). Vary `N`, `D`, and `K` independently after the first baseline. Do not require private microscopy data. For like-for-like stage timing, plan a benchmark-only fixed-pass mode that runs exactly `T` update/reassignment passes without early exit; measure normal convergence separately and report actual passes. Fixed-pass mode is not part of the public fit contract.
 
+The straightforward serial C++ baseline was profiled on 2026-09-25 without changing its normal Release hot loops. All three approved separated workloads converged after one update; an additional reproducible `(16,384,8,8)` overlapping-mixture diagnostic (PCG64 seed `20260927`) naturally took 22 updates, matched the Python reference, and does not replace them. In fresh normal `/O2 /fp:precise` timing, the approved moderate workload's seven-run median was `14.3782` ms; its earlier `9.8469` ms median remains historical, with the environmental difference unexplained. Coarse phase timers in a separate build assigned about 92–93% of complete-fit time to assignment on both the one-update and 22-update workloads, versus about 2% and 6% to centroid updates. Roughly 1 ms main-thread IP sampling corroborated assignment at 91.27% of 12,568 primary samples and 92.09% of 9,512 iterative samples. Source attribution concentrated on distance accumulation, combined address/load/subtract, and loop/selection work; inlining prevents exact operation-level separation. Centroid accumulation becomes more relevant with repeated updates but does not displace assignment. The next isolated CPU experiment is to reduce repeated assignment row/centroid address calculation without changing traversal or FP32 arithmetic, then compare exact outputs and fresh timings. Full phase and sample breakdowns are in the [Project 2 report](03_CUDA_KMeans/README.md); no optimization has been implemented yet.
+
 ### Engineering path and decisions to defer
 
 Build the Python reference and fixtures first, then a straightforward serial C++ implementation, native profiling and measured scalar changes, OpenMP, correctness-first CUDA, Nsight-guided stage optimization, transfer/device-residency characterization, and a Python interface only when useful. Separate assignment, centroid update, convergence, transfers, and whole-fit time. Do not predetermine CUDA point mapping, AoS versus SoA layout, atomics versus hierarchical reductions, centroid caching, kernel fusion, or convergence-reduction strategy before baseline measurements.
@@ -323,7 +325,7 @@ All projects currently live in this public parent portfolio, and future work sho
 - [x] Create the authoritative NumPy reference and public deterministic fixtures
 - [x] Implement and validate straightforward serial C++
 - [x] Establish initial native/Python whole-fit timing on the moderate public workload
-- [ ] Profile the serial C++ baseline on the moderate public workload
+- [x] Profile the serial C++ baseline on the moderate public workload and a separate natural multi-update diagnostic
 - [ ] Optimize CPU phases in response to measured bottlenecks
 - [ ] Implement and validate initial CUDA
 - [ ] Profile CUDA and optimize measured assignment/update bottlenecks

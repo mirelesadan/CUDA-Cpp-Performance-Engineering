@@ -109,17 +109,29 @@ int main(int argc, char** argv) {
 
         kmeans::Result result;
         std::vector<double> timings_ms;
+#ifdef KMEANS_PHASE_TIMING
+        std::vector<kmeans::PhaseTimings> phase_runs;
+#endif
         if (timed_runs == 0) {
             result = fit();
+#ifdef KMEANS_PHASE_TIMING
+            phase_runs.push_back(kmeans::last_phase_timings());
+#endif
         } else {
             result = fit();  // One untimed warm-up; allocations remain inside fit.
             timings_ms.reserve(timed_runs);
+#ifdef KMEANS_PHASE_TIMING
+            phase_runs.reserve(timed_runs);
+#endif
             for (std::size_t run = 0; run < timed_runs; ++run) {
                 const auto start = std::chrono::steady_clock::now();
                 auto timed_result = fit();
                 const auto end = std::chrono::steady_clock::now();
                 timings_ms.push_back(
                     std::chrono::duration<double, std::milli>(end - start).count());
+#ifdef KMEANS_PHASE_TIMING
+                phase_runs.push_back(kmeans::last_phase_timings());
+#endif
                 result = std::move(timed_result);
             }
         }
@@ -136,7 +148,26 @@ int main(int argc, char** argv) {
             }
             std::cout << std::fixed << std::setprecision(6) << timings_ms[index];
         }
-        std::cout << "]}\n";
+        std::cout << ']';
+#ifdef KMEANS_PHASE_TIMING
+        std::cout << ",\"phase_timings\":[";
+        for (std::size_t index = 0; index < phase_runs.size(); ++index) {
+            if (index != 0) {
+                std::cout << ',';
+            }
+            const auto& phase = phase_runs[index];
+            std::cout << "{\"validation_ms\":" << phase.validation_ms
+                      << ",\"initialization_ms\":" << phase.initialization_ms
+                      << ",\"initial_assignment_ms\":" << phase.initial_assignment_ms
+                      << ",\"centroid_update_ms\":" << phase.centroid_update_ms
+                      << ",\"reassignment_ms\":" << phase.reassignment_ms
+                      << ",\"convergence_check_ms\":" << phase.convergence_check_ms
+                      << ",\"assignment_passes\":" << phase.assignment_passes
+                      << ",\"centroid_updates\":" << phase.centroid_updates << '}';
+        }
+        std::cout << ']';
+#endif
+        std::cout << "}\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Project 2 serial driver error: " << error.what() << '\n';

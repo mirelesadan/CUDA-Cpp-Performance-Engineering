@@ -7,13 +7,16 @@ Run from the repository root with:
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 import unittest
 
 import numpy as np
 
-from benchmark_data import GENERATOR_VERSION, WORKLOADS, WorkloadSpec, generate_workload
+from benchmark_data import (GENERATOR_VERSION, ITERATIVE_PROFILE_SPEC, WORKLOADS,
+                            WorkloadSpec, generate_iterative_workload,
+                            generate_workload)
 from reference import (CONTRACT_VERSION, _assign_fp32, _fit_with_update_cap,
                        _update_float64, compare_results, fit_kmeans,
                        initial_row_indices, validation_inertia)
@@ -33,6 +36,20 @@ def public_cases() -> list[dict]:
 
 
 class KMeansReferenceTests(unittest.TestCase):
+    def test_iterative_profiling_workload_is_reproducible(self) -> None:
+        generated = generate_iterative_workload()
+        self.assertEqual(generated.spec, ITERATIVE_PROFILE_SPEC)
+        self.assertEqual(generated.samples.shape, (16_384, 8))
+        self.assertEqual(generated.samples.dtype, np.float32)
+        self.assertTrue(generated.samples.flags.c_contiguous)
+        self.assertEqual(
+            hashlib.sha256(generated.samples.tobytes()).hexdigest(),
+            "97359ddaf01fe506a28efc48159760324af6db9226d56e5a6624b20d62c81904",
+        )
+        result = fit_kmeans(generated.samples, generated.spec.k)
+        self.assertEqual(result.update_count, 22)
+        self.assertTrue(result.converged)
+
     def test_seeded_workload_generator_without_benchmarking(self) -> None:
         self.assertEqual(GENERATOR_VERSION, 1)
         self.assertEqual((WORKLOADS["profiling"].n, WORKLOADS["profiling"].d,

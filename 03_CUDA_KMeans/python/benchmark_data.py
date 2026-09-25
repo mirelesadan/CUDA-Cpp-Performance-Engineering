@@ -42,6 +42,10 @@ WORKLOADS = {
     "stress_optional": WorkloadSpec("stress_optional", 1_048_576, 32, 32, 20_260_926),
 }
 
+# Profiling-only iterative behavior; not a replacement for the approved
+# separated-cluster benchmark workloads above.
+ITERATIVE_PROFILE_SPEC = WorkloadSpec("iterative_profile", 16_384, 8, 8, 20_260_927)
+
 
 def _prototype_centers(k: int, d: int) -> np.ndarray:
     """Repeated cluster-index bits make every feature informative and separated."""
@@ -82,4 +86,24 @@ def generate_workload(spec: WorkloadSpec) -> GeneratedWorkload:
         seed_row = ((2 * cluster + 1) * spec.n) // (2 * spec.k)
         samples[seed_row] = centers[cluster]
         planted[seed_row] = cluster
+    return GeneratedWorkload(samples, planted, centers, spec)
+
+
+def generate_iterative_workload() -> GeneratedWorkload:
+    """A deterministic, ordinary overlapping mixture for multi-update profiling.
+
+    PCG64 draws FP64 centers N(0,2) in a single KxD call, shuffles cyclic
+    planted labels, then draws FP64 N(0,2) noise in one NxD call. Center plus
+    noise is cast once to contiguous FP32. Unlike the separated workloads,
+    seed rows are *not* overwritten; Lloyd uses its normal input-row rule.
+    """
+    spec = ITERATIVE_PROFILE_SPEC
+    rng = np.random.Generator(np.random.PCG64(spec.seed))
+    centers = rng.normal(0.0, 2.0, size=(spec.k, spec.d))
+    planted = np.arange(spec.n, dtype=np.int32) % spec.k
+    rng.shuffle(planted)
+    noise = rng.normal(0.0, 2.0, size=(spec.n, spec.d))
+    samples = np.ascontiguousarray((centers[planted] + noise).astype(np.float32))
+    if not np.isfinite(samples).all() or np.any(np.abs(samples) > 1024.0):
+        raise AssertionError("iterative profiling generator breached input bounds")
     return GeneratedWorkload(samples, planted, centers, spec)

@@ -13,6 +13,22 @@ struct Result {
     bool converged;
 };
 
+#ifdef KMEANS_PHASE_TIMING
+// Available only in the separate profiling build; normal Release has no timers.
+struct PhaseTimings {
+    double validation_ms = 0.0;
+    double initialization_ms = 0.0;
+    double initial_assignment_ms = 0.0;
+    double centroid_update_ms = 0.0;
+    double reassignment_ms = 0.0;
+    double convergence_check_ms = 0.0;
+    std::size_t assignment_passes = 0;
+    std::size_t centroid_updates = 0;
+};
+
+PhaseTimings last_phase_timings();
+#endif
+
 // Deterministic input-row initialization from the frozen Project 2 contract.
 std::vector<std::size_t> initial_row_indices(std::size_t n, std::size_t k);
 

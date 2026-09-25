@@ -4,6 +4,9 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#ifdef KMEANS_PHASE_TIMING
+#include <chrono>
+#endif
 
 namespace kmeans {
 namespace {
@@ -17,6 +20,15 @@ constexpr std::size_t max_n = 1u << 20;
 constexpr std::size_t max_d = 32;
 constexpr std::size_t max_k = 32;
 constexpr float max_magnitude = 1024.0f;
+
+#ifdef KMEANS_PHASE_TIMING
+using ProfileClock = std::chrono::steady_clock;
+thread_local PhaseTimings recorded_phases;
+
+double elapsed_ms(ProfileClock::time_point start, ProfileClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+#endif
 
 void validate(const std::vector<float>& input, std::size_t n,
               std::size_t d, std::size_t k, std::size_t max_updates) {
@@ -96,6 +108,12 @@ std::vector<float> update(const std::vector<float>& input,
 
 }  // namespace
 
+#ifdef KMEANS_PHASE_TIMING
+PhaseTimings last_phase_timings() {
+    return recorded_phases;
+}
+#endif
+
 std::vector<std::size_t> initial_row_indices(std::size_t n, std::size_t k) {
     if (n < 2 || n > max_n || k < 2 || k > max_k || k > n) {
         throw std::invalid_argument("initial rows require 2 <= K <= min(N,32), N <= 2^20");
@@ -110,7 +128,15 @@ std::vector<std::size_t> initial_row_indices(std::size_t n, std::size_t k) {
 Result kmeans_serial_with_update_cap(const std::vector<float>& input,
                                      std::size_t n, std::size_t d,
                                      std::size_t k, std::size_t max_updates) {
+#ifdef KMEANS_PHASE_TIMING
+    PhaseTimings phases;
+    auto phase_start = ProfileClock::now();
+#endif
     validate(input, n, d, k, max_updates);
+#ifdef KMEANS_PHASE_TIMING
+    phases.validation_ms += elapsed_ms(phase_start, ProfileClock::now());
+    phase_start = ProfileClock::now();
+#endif
     std::vector<float> centroids(k * d);
     const auto seed_rows = initial_row_indices(n, k);
     for (std::size_t cluster = 0; cluster < k; ++cluster) {
@@ -118,17 +144,47 @@ Result kmeans_serial_with_update_cap(const std::vector<float>& input,
             centroids[cluster * d + feature] = input[seed_rows[cluster] * d + feature];
         }
     }
+#ifdef KMEANS_PHASE_TIMING
+    phases.initialization_ms += elapsed_ms(phase_start, ProfileClock::now());
+    phase_start = ProfileClock::now();
+#endif
     auto labels = assign(input, centroids, n, d, k);
+#ifdef KMEANS_PHASE_TIMING
+    phases.initial_assignment_ms += elapsed_ms(phase_start, ProfileClock::now());
+    phases.assignment_passes = 1;
+#endif
     for (std::size_t pass = 1; pass <= max_updates; ++pass) {
+#ifdef KMEANS_PHASE_TIMING
+        phase_start = ProfileClock::now();
+#endif
         auto next_centroids = update(input, labels, centroids, n, d, k);
+#ifdef KMEANS_PHASE_TIMING
+        phases.centroid_update_ms += elapsed_ms(phase_start, ProfileClock::now());
+        ++phases.centroid_updates;
+        phase_start = ProfileClock::now();
+#endif
         auto next_labels = assign(input, next_centroids, n, d, k);
+#ifdef KMEANS_PHASE_TIMING
+        phases.reassignment_ms += elapsed_ms(phase_start, ProfileClock::now());
+        ++phases.assignment_passes;
+        phase_start = ProfileClock::now();
+#endif
         const bool converged = next_labels == labels;
+#ifdef KMEANS_PHASE_TIMING
+        phases.convergence_check_ms += elapsed_ms(phase_start, ProfileClock::now());
+#endif
         centroids = std::move(next_centroids);
         labels = std::move(next_labels);
         if (converged) {
+#ifdef KMEANS_PHASE_TIMING
+            recorded_phases = phases;
+#endif
             return {std::move(labels), std::move(centroids), pass, true};
         }
     }
+#ifdef KMEANS_PHASE_TIMING
+    recorded_phases = phases;
+#endif
     return {std::move(labels), std::move(centroids), max_updates, false};
 }
 
