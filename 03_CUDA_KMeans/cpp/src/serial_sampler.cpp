@@ -126,9 +126,10 @@ void resolve_samples(const std::vector<DWORD64>& addresses) {
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 6) {
+        if (argc != 6 && argc != 8) {
             throw std::invalid_argument(
-                "usage: phase2_kmeans_serial_sampler input.f32 N D K repeats");
+                "usage: phase2_kmeans_serial_sampler input.f32 N D K repeats "
+                "[--variant baseline|addressed]");
         }
         const auto n = parse_size(argv[2], "N");
         const auto d = parse_size(argv[3], "D");
@@ -138,8 +139,23 @@ int main(int argc, char** argv) {
             k < 2 || k > 32 || k > n || repeats < 1 || repeats > 10000) {
             throw std::invalid_argument("dimensions or repeat count outside profiling limits");
         }
+        std::string variant = "baseline";
+        if (argc == 8) {
+            if (std::string(argv[6]) != "--variant") {
+                throw std::invalid_argument("expected --variant before implementation name");
+            }
+            variant = argv[7];
+            if (variant != "baseline" && variant != "addressed") {
+                throw std::invalid_argument("variant must be baseline or addressed");
+            }
+        }
         const auto input = read_input(argv[1], n, d);
-        auto result = kmeans::kmeans_serial(input, n, d, k);  // Untimed warm-up.
+        const auto fit = [&] {
+            return variant == "addressed"
+                ? kmeans::kmeans_serial_addressed(input, n, d, k)
+                : kmeans::kmeans_serial(input, n, d, k);
+        };
+        auto result = fit();  // Untimed warm-up.
         std::vector<DWORD64> addresses;
         addresses.reserve(50000);
 
@@ -210,7 +226,7 @@ int main(int argc, char** argv) {
                 }
             });
             for (std::size_t run = 0; run < repeats; ++run) {
-                result = kmeans::kmeans_serial(input, n, d, k);
+                result = fit();
             }
         } catch (...) {
             cleanup();
@@ -223,7 +239,8 @@ int main(int argc, char** argv) {
         if (sampler_error.load() != ERROR_SUCCESS || addresses.empty()) {
             throw std::runtime_error("sampler could not collect main-thread PCs");
         }
-        std::cout << "repeats=" << repeats << " update_count=" << result.update_count
+        std::cout << "variant=" << variant << " repeats=" << repeats
+                  << " update_count=" << result.update_count
                   << " converged=" << (result.converged ? "true" : "false")
                   << " timer_period_request_ms=1 sleep_request_ms=1";
         if (addresses.size() > 1) {

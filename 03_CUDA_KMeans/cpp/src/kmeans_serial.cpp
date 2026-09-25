@@ -77,6 +77,34 @@ std::vector<std::int32_t> assign(const std::vector<float>& input,
     return labels;
 }
 
+std::vector<std::int32_t> assign_addressed(const std::vector<float>& input,
+                                           const std::vector<float>& centroids,
+                                           std::size_t n, std::size_t d,
+                                           std::size_t k) {
+    std::vector<std::int32_t> labels(n);
+    for (std::size_t sample = 0; sample < n; ++sample) {
+        const float* const sample_row = input.data() + sample * d;
+        float best_distance = std::numeric_limits<float>::infinity();
+        std::int32_t best_cluster = 0;
+        for (std::size_t cluster = 0; cluster < k; ++cluster) {
+            const float* const centroid_row = centroids.data() + cluster * d;
+            float distance = 0.0f;
+            for (std::size_t feature = 0; feature < d; ++feature) {
+                // Only row addressing changes: identical ordered FP32 operations.
+                const float difference = sample_row[feature] - centroid_row[feature];
+                const float square = difference * difference;
+                distance = distance + square;
+            }
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_cluster = static_cast<std::int32_t>(cluster);
+            }
+        }
+        labels[sample] = best_cluster;
+    }
+    return labels;
+}
+
 std::vector<float> update(const std::vector<float>& input,
                           const std::vector<std::int32_t>& labels,
                           const std::vector<float>& previous,
@@ -191,6 +219,37 @@ Result kmeans_serial_with_update_cap(const std::vector<float>& input,
 Result kmeans_serial(const std::vector<float>& input, std::size_t n,
                      std::size_t d, std::size_t k) {
     return kmeans_serial_with_update_cap(input, n, d, k, 100);
+}
+
+Result kmeans_serial_addressed_with_update_cap(const std::vector<float>& input,
+                                               std::size_t n, std::size_t d,
+                                               std::size_t k,
+                                               std::size_t max_updates) {
+    validate(input, n, d, k, max_updates);
+    std::vector<float> centroids(k * d);
+    const auto seed_rows = initial_row_indices(n, k);
+    for (std::size_t cluster = 0; cluster < k; ++cluster) {
+        for (std::size_t feature = 0; feature < d; ++feature) {
+            centroids[cluster * d + feature] = input[seed_rows[cluster] * d + feature];
+        }
+    }
+    auto labels = assign_addressed(input, centroids, n, d, k);
+    for (std::size_t pass = 1; pass <= max_updates; ++pass) {
+        auto next_centroids = update(input, labels, centroids, n, d, k);
+        auto next_labels = assign_addressed(input, next_centroids, n, d, k);
+        const bool converged = next_labels == labels;
+        centroids = std::move(next_centroids);
+        labels = std::move(next_labels);
+        if (converged) {
+            return {std::move(labels), std::move(centroids), pass, true};
+        }
+    }
+    return {std::move(labels), std::move(centroids), max_updates, false};
+}
+
+Result kmeans_serial_addressed(const std::vector<float>& input, std::size_t n,
+                               std::size_t d, std::size_t k) {
+    return kmeans_serial_addressed_with_update_cap(input, n, d, k, 100);
 }
 
 }  // namespace kmeans

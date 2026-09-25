@@ -43,4 +43,15 @@ Result kmeans_serial_with_update_cap(const std::vector<float>& input,
                                      std::size_t n, std::size_t d,
                                      std::size_t k, std::size_t max_updates);
 
+// Isolated address-calculation candidate. The original serial implementation
+// above remains the control for exact-result and same-session comparisons.
+Result kmeans_serial_addressed(const std::vector<float>& input, std::size_t n,
+                               std::size_t d, std::size_t k);
+
+// Test-only reduced-cap equivalent for the frozen nonconvergence fixture.
+Result kmeans_serial_addressed_with_update_cap(const std::vector<float>& input,
+                                               std::size_t n, std::size_t d,
+                                               std::size_t k,
+                                               std::size_t max_updates);
+
 }  // namespace kmeans

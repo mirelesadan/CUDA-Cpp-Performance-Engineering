@@ -25,6 +25,8 @@ def main() -> None:
     parser.add_argument("workload", choices=(*WORKLOADS, ITERATIVE_PROFILE_SPEC.name))
     parser.add_argument("--sample-repeats", type=int, default=0,
                         help="use the Windows sampling executable for this many fits")
+    parser.add_argument("--variant", choices=("baseline", "addressed"),
+                        default="baseline", help="implementation to sample or time")
     args = parser.parse_args()
     executable = args.executable.resolve()
     if not executable.is_file():
@@ -39,17 +41,20 @@ def main() -> None:
         with tempfile.TemporaryDirectory(prefix="project2_sampling_") as temporary:
             input_path = Path(temporary) / f"{spec.name}.f32"
             generated.samples.tofile(input_path)
-            completed = subprocess.run(
-                [str(executable), str(input_path), str(spec.n), str(spec.d),
-                 str(spec.k), str(args.sample_repeats)],
-                text=True, capture_output=True, check=True)
+            command = [str(executable), str(input_path), str(spec.n), str(spec.d),
+                       str(spec.k), str(args.sample_repeats)]
+            if args.variant != "baseline":
+                command.extend(["--variant", args.variant])
+            completed = subprocess.run(command, text=True, capture_output=True,
+                                       check=True)
         print(f"{spec.name}: N={spec.n}, D={spec.d}, K={spec.k}, "
               f"PCG64 seed={spec.seed}")
         print(completed.stdout, end="")
         return
     with tempfile.TemporaryDirectory(prefix="project2_profile_") as temporary:
         result, metadata = run_native(executable, generated.samples, spec.k,
-                                      Path(temporary), spec.name, timed_runs=7)
+                                      Path(temporary), spec.name, timed_runs=7,
+                                      variant=args.variant)
     times = metadata["timings_ms"]
     if len(times) != 7 or metadata["warmup"] != 1:
         raise AssertionError("expected one warm-up and seven complete-fit timings")

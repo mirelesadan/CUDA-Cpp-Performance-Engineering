@@ -29,7 +29,8 @@ from test_reference import public_cases
 
 def run_native(executable: Path, points: np.ndarray, k: int, directory: Path,
                stem: str, *, test_cap: int | None = None,
-               timed_runs: int = 0) -> tuple[KMeansResult, dict]:
+               timed_runs: int = 0,
+               variant: str = "baseline") -> tuple[KMeansResult, dict]:
     if sys.byteorder != "little":
         raise RuntimeError("raw validation bridge requires a little-endian host")
     if points.dtype != np.float32 or not points.flags.c_contiguous:
@@ -46,6 +47,8 @@ def run_native(executable: Path, points: np.ndarray, k: int, directory: Path,
         args.extend(["--test-update-cap", str(test_cap)])
     if timed_runs:
         args.extend(["--timed-runs", str(timed_runs)])
+    if variant != "baseline":
+        args.extend(["--variant", variant])
     completed = subprocess.run(args, check=True, text=True, capture_output=True)
     metadata = json.loads(completed.stdout)
     np.testing.assert_array_equal(points.view(np.uint32), before)
@@ -63,7 +66,8 @@ def run_native(executable: Path, points: np.ndarray, k: int, directory: Path,
                          metadata["converged"]), metadata)
 
 
-def validate_fixtures(executable: Path, directory: Path) -> None:
+def validate_fixtures(executable: Path, directory: Path,
+                      variant: str = "baseline") -> None:
     total = 0
     centroid_bit_mismatches = 0
     for case in public_cases():
@@ -81,10 +85,12 @@ def validate_fixtures(executable: Path, directory: Path) -> None:
         np.testing.assert_array_equal(reference.centroids.view(np.uint32),
                                       expected_centroids.view(np.uint32))
         native, _ = run_native(executable, points, k, directory, case["name"],
-                               test_cap=cap if cap != 100 else None)
+                               test_cap=cap if cap != 100 else None,
+                               variant=variant)
         second, _ = run_native(executable, points, k, directory,
                                case["name"] + ".repeat",
-                               test_cap=cap if cap != 100 else None)
+                               test_cap=cap if cap != 100 else None,
+                               variant=variant)
         compare_results(points, reference, native)
         np.testing.assert_array_equal(native.labels, second.labels)
         np.testing.assert_array_equal(native.centroids.view(np.uint32),
@@ -106,7 +112,7 @@ def validate_fixtures(executable: Path, directory: Path) -> None:
         print(f"{case['name']}: {len(points)} exact labels, "
               f"centroid-bit mismatches={bits}, updates={native.update_count}, "
               f"converged={native.converged}")
-    print(f"Fixtures: {len(public_cases())} cases, {total} labels exact, "
+    print(f"{variant} fixtures: {len(public_cases())} cases, {total} labels exact, "
           f"{centroid_bit_mismatches} centroid-bit mismatches; "
           "input/ownership/repeatability checks passed")
 
@@ -151,14 +157,18 @@ def main() -> None:
     parser.add_argument("executable", type=Path, help="Release phase2_kmeans_serial executable")
     parser.add_argument("--benchmark", action="store_true",
                         help="time the frozen profiling workload after fixture validation")
+    parser.add_argument("--variant", choices=("baseline", "addressed"),
+                        default="baseline", help="serial implementation to validate")
     args = parser.parse_args()
     executable = args.executable.resolve()
     if not executable.is_file():
         parser.error(f"executable does not exist: {executable}")
     with tempfile.TemporaryDirectory(prefix="project2_kmeans_") as temporary:
         directory = Path(temporary)
-        validate_fixtures(executable, directory)
+        validate_fixtures(executable, directory, args.variant)
         if args.benchmark:
+            if args.variant != "baseline":
+                parser.error("use the paired assignment benchmark for the addressed variant")
             benchmark(executable, directory)
 
 

@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract and straightforward serial C++ baseline are complete; optimization has not begun.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, straightforward serial C++ baseline, CPU profile, and first retained addressing optimization are complete.
 
 ## Why this project exists
 
@@ -66,13 +66,43 @@ Coarse phase timing uses a separately built, symbol-enabled Release target with 
 
 For source-level evidence, an optimized symbol build without phase timers requested a 1 ms Windows timer period and slept 1 ms between main-thread instruction-pointer samples, buffering PCs during repeated fits and resolving PDB source/function locations afterward. A later sampler smoke test observed a roughly 2 ms mean actual interval, so the request is not an exact cadence guarantee. The approved workload yielded 12,568 samples (11,969 line-resolved; 1,500 fits); the iterative workload yielded 9,512 (9,435 line-resolved; 700 fits). Assignment accounted for 91.27% and 92.09% of all samples, respectively; centroid update for 1.92% and 6.79%. On the approved workload, the distance-accumulation source line had 36.23%, the combined input/centroid address-load-subtract line 27.51%, the square line 5.35%, cluster/feature loop lines together 12.06%, and strict minimum/selection lines together 9.29%. On the iterative workload these were approximately 33.78%, 27.32%, 4.26%, 13.46%, and 12.47%. The FP64 update sum line increased from 1.51% to 5.62%; count/division/cast and convergence had no separately significant attribution. Inlined optimized instructions can map ambiguously to source, especially the combined address/load/subtract expression; these are directional sample shares, not independently timed operation costs. Profiler-run wall time is not a benchmark.
 
-Both one-update and 22-update fits are assignment-dominated. The update phase becomes more relevant with iteration count and will matter for future parallel reductions, but it is not the primary serial bottleneck here. Ranked CPU candidates: (1) reduce repeated assignment-loop row/centroid address calculation without changing traversal or FP32 arithmetic (the combined load/address line and loop lines account for substantial samples; low numerical risk); (2) investigate the FP32 distance-accumulation dependency (the largest single source line, but higher exact-semantics risk); (3) simplify cluster-minimum bookkeeping (9–12% selection attribution, smaller expected ceiling). The **next isolated experiment** is candidate 1, with a fresh same-session baseline and exact output comparison; none of these changes is implemented here.
+Both one-update and 22-update fits are assignment-dominated. The update phase becomes more relevant with iteration count and will matter for future parallel reductions, but it is not the primary serial bottleneck here. The first selected optimization was repeated assignment-row address calculation; its isolated result follows below.
 
 Reproduce the whole-fit checks with `python -B 03_CUDA_KMeans/python/profile_workloads.py 03_CUDA_KMeans/cpp/build/Release/phase2_kmeans_serial.exe profiling` (or `gpu`, `stress_optional`, `iterative_profile`). For phase timing and sampling, configure a separate ignored build with `-DPROJECT2_ENABLE_PHASE_TIMING=ON -DPROJECT2_ENABLE_PROFILING_SYMBOLS=ON`; run the corresponding `phase2_kmeans_serial_phase_timing.exe` through that driver, or `phase2_kmeans_serial_sampler.exe` with `--sample-repeats`. Both options default to `OFF`; normal Release and public API remain uninstrumented. No generated arrays or profiler reports are versioned.
 
+### Isolated serial experiment 1 — assignment row addressing
+
+The retained `kmeans_serial_addressed` path computes a sample-row pointer once per sample and a centroid-row pointer once per cluster, then uses the same ascending feature offsets. The original `kmeans_serial` assignment and fit remain callable and unchanged. Subtraction, square, ordered FP32 addition, strict cluster comparison, FP64 centroid update, and all other fit decisions are identical. The candidate is a separate path rather than a change to the numerical contract.
+
+Both paths passed all six public fixtures (96 exact labels each, zero centroid-bit mismatches), including the FP32-sensitive label-0 case, reduced-cap nonconvergence, inertia checks, invalid inputs, input immutability, independent outputs, and repeatability. Native tests and the Project 1 public Phase A/B regression smoke tests passed. In every timed pair on both larger workloads, baseline and candidate labels, centroid bits, update counts, and convergence flags matched exactly; candidate outputs also matched the Python oracle.
+
+The normal MSVC x64 Release build (`/O2 /fp:precise`, no timers/symbol profiling) loaded input once, warmed both paths, then timed complete fits with `std::chrono::steady_clock`. Each seven-pair primary block alternated baseline/candidate and candidate/baseline order; three blocks reversed their starting order as baseline/addressed/baseline. Validation and fit allocations remained inside each timed call; file I/O, result comparisons, and output serialization were outside. Raw first-sequence times (ms) show every primary call:
+
+| Block | Baseline: seven calls | Addressed: seven calls | Median baseline/addressed |
+| --- | --- | --- | ---: |
+| 1 | 17.3435, 17.0801, 17.4447, 17.2707, 17.0932, 17.3634, 17.5040 | 16.3291, 16.7475, 16.1374, 17.0416, 16.2643, 16.2157, 16.2935 | 17.3435 / 16.2935 |
+| 2 | 17.1903, 17.0361, 17.6090, 17.3000, 17.5366, 17.2602, 17.5111 | 16.0903, 16.4803, 16.7146, 16.6305, 17.9678, 16.3202, 16.2016 | 17.3000 / 16.4803 |
+| 3 | 17.8546, 17.3402, 17.5767, 17.4755, 21.2794, 19.2651, 23.7187 | 16.9695, 16.3030, 16.3756, 16.3819, 18.3592, 18.6169, 18.2099 | 17.8546 / 16.9695 |
+
+Across these 21 calls per path, baseline min/median/max was `17.0361 / 17.4447 / 23.7187` ms and addressed was `16.0903 / 16.3819 / 18.6169` ms: `1.064876×` speedup, `6.0924%` less runtime, `4.0005` million samples/s, and `128.0164` million sample-cluster distance evaluations/s for the candidate. Because late calls drifted, a bounded second 21-pair confirmation used the same reversing-start protocol; its complete raw times (ms) were:
+
+| Block | Baseline: seven calls | Addressed: seven calls | Median baseline/addressed |
+| --- | --- | --- | ---: |
+| 1 | 19.8575, 17.3348, 17.6895, 17.2538, 19.4931, 27.9677, 19.3436 | 16.2662, 16.5022, 16.4005, 16.5677, 16.3212, 16.2888, 16.2241 | 19.3436 / 16.3212 |
+| 2 | 17.4443, 17.1590, 23.8452, 17.1959, 18.1253, 22.1492, 17.4077 | 16.0900, 16.8359, 17.1511, 16.3405, 16.4837, 16.8326, 16.1225 | 17.4443 / 16.4837 |
+| 3 | 17.4659, 17.5925, 17.4778, 18.5338, 19.1282, 17.2930, 17.1994 | 16.8685, 16.5510, 17.2762, 18.4982, 16.4072, 16.7353, 16.2399 | 17.4778 / 16.7353 |
+
+Second-sequence pooled baseline/candidate medians were `17.5925/16.4837` ms (`1.067266×`, `6.3027%` reduction). Its first block includes baseline outliers, so individual block ratios are not treated as precise gains. The controlled sequences consistently favor the candidate, but their absolute times differ from both historical baselines for unresolved environment reasons.
+
+On the 22-update `iterative_profile` diagnostic, the first five paired baseline times were `30.0779, 32.2918, 32.8941, 34.9107, 40.7526` ms (median `32.8941`); addressed times were `29.4573, 28.9914, 30.0874, 31.0668, 64.5520` ms (median `30.0874`, `1.093285×`). The final addressed call was an outlier, so three more five-pair blocks were checked; their pooled medians were `31.0433/28.1952` ms (`1.101014×`), with block medians `32.9520/28.8420`, `29.9879/28.1496`, and `29.7204/28.1429`. No repeatable multi-update regression was observed.
+
+A fresh symbol-only Windows main-thread sampling comparison on the primary workload collected 18,904 baseline and 15,311 candidate samples (1,500 fits each; requested 1 ms timer, observed mean intervals 2.854/3.868 ms). Assignment remained dominant at 91.11%/89.79%; FP32 distance-addition lines drew 35.81%/34.69%, square lines 3.79%/5.38%, cluster selection about 8.9% in both, and centroid update 2.02%/2.27%. The old combined address/load/subtract line drew 29.61%; candidate samples spread across the difference/load (8.67%), centroid-row setup (10.98%), and cluster-loop line (19.00%, up from 7.16%). The targeted *single line* shrank, but source remapping/inlining prevents claiming that all its former cost disappeared. Sample counts and profiler wall times are not speedup measurements; the paired unprofiled timings are the retention evidence.
+
+The addressed path is retained as a readable first CPU improvement. Remaining opportunities, ranked by measured importance and tractability, are (1) ordered FP32 distance accumulation and its dependency chain (~35% source attribution; high exact-semantics risk) and (2) cluster-minimum bookkeeping (~9%; lower potential ceiling). **Next isolated experiment:** test a two-feature software pipeline that computes adjacent differences/squares ahead, but adds their squares to one FP32 accumulator in the original feature order; reject it unless exact results and paired timings justify it. No further optimization is implemented here. Reproduce paired results with `python -B 03_CUDA_KMeans/python/benchmark_assignment_addressing.py 03_CUDA_KMeans/cpp/build/Release/phase2_kmeans_serial.exe profiling` (or `iterative_profile`); the sampler accepts `--variant addressed` through the profiling driver.
+
 ## Planned workflow
 
-Next: test one isolated assignment-addressing change against the profiled straightforward serial baseline, then remeasure before later OpenMP and correctness-first CUDA. Python integration and library comparisons come after the native behavior is trustworthy.
+Next: investigate the two-feature, ordered-addition software pipeline against the retained addressed path, then remeasure before later OpenMP and correctness-first CUDA. Python integration and library comparisons come after the native behavior is trustworthy.
 
 ## Primary learning goals
 
@@ -110,7 +140,7 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, and first native profiling checkpoint complete; CPU optimization has not begun. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, and the first retained serial address-generation optimization are complete. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
