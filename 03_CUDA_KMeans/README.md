@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, and correctness-first CUDA baseline are complete. Focused count/update profiling is next.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, correctness-first CUDA baseline, and focused count/update profiling are complete. An isolated deterministic centroid-reduction experiment is next.
 
 ## Why this project exists
 
@@ -193,11 +193,32 @@ Three separate event-instrumented fits per workload provide directional cumulati
 
 Reproduce with `cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build/cuda -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPROJECT2_ENABLE_CUDA=ON -DPROJECT2_ENABLE_OPENMP=ON -DPROJECT2_CUDA_ARCHITECTURES=89`, then build Release, run CTest, and run `python -B 03_CUDA_KMeans/python/benchmark_cuda.py PATH_TO_EXE all` in the existing Python environment. CUDA and OpenMP are off by default; CUDA can build without OpenMP, while the combined benchmark target requires both. The driver creates temporary raw arrays only; no benchmark data or generated binaries are committed.
 
-The ranked CUDA opportunities are (1) replace redundant ordered full-dataset scans with a carefully validated parallel centroid reduction, the dominant but highest numerical-risk change; (2) parallelize or restructure integer cluster counting, a smaller repeated scan; (3) reduce per-pass convergence/launch overhead, relevant mainly after the first two. Focused Nsight Compute profiling of the current count/update kernels is the next experiment before choosing a reduction architecture. Assignment caching, transfers, and fusion are not first priorities on this baseline evidence.
+### Focused count/update profile — reduction decision checkpoint
+
+Nsight Compute CLI 2025.2.1 profiled one warmed, normal (non-diagnostic) launch of each unchanged kernel on the generated `gpu` workload `(N,D,K)=(262,144,16,16)`. A separate MSVC Release / CUDA 12.9 / `sm_89` build added only `-DCMAKE_CUDA_FLAGS=-lineinfo`; the normal build remains unchanged. For each kernel, `ncu --kernel-name regex:count_clusters` (or `regex:update_centroids`) used `--launch-skip 3 --launch-count 1` on the existing CUDA benchmark with `--runs 1 --diagnostic-runs 0`, after input loading and three correctness-checked CUDA warm-ups. The counter pass selected LaunchStats, Occupancy, SpeedOfLight, SchedulerStats, WarpStateStats, MemoryWorkloadAnalysis, ComputeWorkloadAnalysis, and InstructionStats; a separate SourceCounters pass imported the CUDA source. Profiler replay durations and whole-fit wall times are **not** benchmark timings; the unprofiled CUDA-event stage medians above (count 3.021 ms, update 45.951 ms) remain the performance reference. Generated input and `.ncu-rep` reports remain ignored.
+
+| Metric | Count | Centroid update |
+| --- | ---: | ---: |
+| Grid × block; useful workers | 1 × 256; 16 clusters | 1 × 256; 256 cluster-feature pairs |
+| Registers/thread; static/dynamic shared memory; local load/store sectors | 40; 0/0; 0/0 | 31; 0/0; 0/0 |
+| Achieved occupancy; active warps/active SM | 2.08%; 1 | 16.67%; 8 |
+| SM / DRAM / L1-TEX / L2 throughput (peak %) | 0.11 / 0.08 / 4.01 / 0.04 | 2.39 / 0.54 / 10.74 / 0.26 |
+| L1 / L2 hit rate | 87.50 / 56.27% | 78.75 / 13.56% |
+| Average global-load data bytes per 32-byte sector; branch efficiency | 4.00; 100% | 9.60; 100% |
+| Scheduler cycles with no eligible warp | 91.22% | 93.46% |
+| Dominant PC-sampled stalls | Long scoreboard 9,734/12,762 (76.3%) | Short scoreboard 47,481/76,405 (62.1%); long 20,463 (26.8%) |
+
+Each grid has only one block for 36 SMs (about 0.028 blocks/SM), regardless of the reported occupancy *within its active SM*. Count has only half a warp of useful cluster workers; update has eight useful warps on one SM. Neither is device-wide DRAM-bandwidth limited. Count waits mainly on label-load dependencies, while update combines repeated label loads with a dependent FP64 sum: Nsight reported FP64 as 85.94% utilized among active compute pipelines, though device-wide SM throughput was only 2.39%. Zero local load/store sectors provide no evidence of spills. The low average useful bytes/sector are driven by broadcast-like label loads, not excess sectors in the conditional feature loads: source counters attributed 262,144 ideal sectors to count labels; update had 2,097,152 ideal sectors for labels and 524,288 ideal sectors for input values. Cache-hit rates and DRAM bytes vary with replay/cache state; these percentages are directional, not independent timing shares.
+
+Source mapping places count's label load/comparison/increment together at its inner-loop line, with most long-scoreboard samples there. For update, the label comparison line has 7,672 long-scoreboard samples; the input-load/FP64-add expression has 12,714 long- and 30,554 short-scoreboard samples, and loop/index instructions have another 16,915 short-scoreboard samples. The compiler unrolled loops and mapped multiple SASS instructions onto those expressions, so these line counts do not isolate precise load, arithmetic, or indexing time. Division/cast/store had negligible sampled stalls. Branch efficiency was 100% for both kernels; control divergence is not the main limit.
+
+On this all-nonempty GPU workload, count logically inspects `N·K = 4,194,304` labels per Lloyd update; update inspects `N·K·D = 67,108,864` labels while accumulating only `N·D = 4,194,304` input feature values. These are algorithmic operation counts, **not** DRAM traffic: they scale as `O(NK)`, `O(NKD)`, and `O(ND)` respectively. Empty clusters skip their update scans, making `N·K_nonempty·D` the general update count. The frozen contract requires exact labels, update count/convergence, centroid error at most `5e-6 × feature_scale`, and inertia error at most `2e-5 × scale` (with an exact-zero-inertia fixture). The baseline's bitwise-identical centroids are stronger than that contract; even a deterministic fixed-order parallel FP64 reduction can change sample-order sum bits. The current CUDA benchmark also applies a stronger exact-bit gate, so a future non-bitwise candidate must deliberately distinguish that control comparison from frozen contractual validation without weakening exact label/termination checks.
+
+Ranked designs: (1) **deterministic two-stage centroid reduction**—parallel fixed sample tiles produce FP64 partial sums, followed by a fixed-order final reduction using the unchanged count kernel; highest expected gain from many blocks and a shorter sum chain, moderate complexity and rounding-order risk. (2) **parallel integer count reduction**, leaving ordered centroid sums untouched; low numerical risk and moderate complexity but addresses only the smaller count stage. (3) **atomic FP64 sum/count accumulation**; ample parallelism but contention, nondeterministic FP64 order, and the highest reproducibility risk. The selected next *single* experiment is design 1, with the current count kernel and assignment unchanged. No kernel optimization was made during this checkpoint.
 
 ## Planned workflow
 
-Next: profile the measured CUDA count/update bottleneck. Python integration, broader size scaling, and library comparisons follow only after the native CUDA architecture has been evaluated.
+Next: test the isolated deterministic two-stage centroid reduction against the retained CUDA baseline and frozen contract. Python integration, broader size scaling, and library comparisons follow native CUDA architecture evaluation.
 
 ## Primary learning goals
 
@@ -235,10 +256,10 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, and the exact correctness-first CUDA baseline are complete. The two-feature distance-pipeline experiment was rejected; focused CUDA count/update profiling is next. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, and focused count/update Nsight profiling are complete. The two-feature distance-pipeline experiment was rejected; deterministic centroid reduction is next. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
 - **TBD:** Explain the historical-versus-fresh baseline timing difference; broader independent size/stage scaling remains future work.
-- **TBD:** Profile-driven CUDA mapping, reduction, layout, and fusion decisions.
+- **TBD:** Validate and benchmark the selected centroid reduction; later CUDA layout and fusion decisions remain open.
 - **TBD:** Availability and fair configuration of external libraries; binding approach.
