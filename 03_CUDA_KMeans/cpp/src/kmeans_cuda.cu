@@ -27,6 +27,7 @@ constexpr std::size_t max_k = 32;
 constexpr float max_magnitude = 1024.0f;
 constexpr int block_size = 256;
 constexpr int reduction_tile_samples = 4096;
+constexpr int count_tile_samples = 1024;
 using Clock = std::chrono::steady_clock;
 
 double elapsed_ms(Clock::time_point first, Clock::time_point last) {
@@ -218,6 +219,37 @@ __global__ void count_clusters(const int* labels, int* counts, int n, int k) {
     counts[cluster] = count;
 }
 
+// One block reads each label in its tile once. Shared integer atomics are
+// exact: their execution order cannot affect the final histogram.
+__global__ void count_tile_partials(const int* labels, int* partials,
+                                    int n, int k) {
+    __shared__ int histogram[max_k];
+    if (threadIdx.x < k) histogram[threadIdx.x] = 0;
+    __syncthreads();
+    const int first = blockIdx.x * count_tile_samples;
+    const int limit = first + count_tile_samples < n
+                          ? first + count_tile_samples : n;
+    for (int sample = first + threadIdx.x; sample < limit;
+         sample += block_size) {
+        atomicAdd(&histogram[labels[sample]], 1);
+    }
+    __syncthreads();
+    if (threadIdx.x < k) {
+        partials[blockIdx.x * k + threadIdx.x] = histogram[threadIdx.x];
+    }
+}
+
+__global__ void finalize_counts(const int* partials, int* counts,
+                                int tile_count, int k) {
+    const int cluster = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cluster >= k) return;
+    int sum = 0;
+    for (int tile = 0; tile < tile_count; ++tile) {
+        sum += partials[tile * k + cluster];
+    }
+    counts[cluster] = sum;
+}
+
 __global__ void update_centroids(const float* input, const int* labels,
                                  const int* counts, float* centroids,
                                  int n, int d, int k) {
@@ -295,7 +327,9 @@ void check_launch(const char* operation) {
 
 Result run(const std::vector<float>& input, std::size_t n,
            std::size_t d, std::size_t k, std::size_t max_updates,
-           CudaStageTimings* timings, bool tiled_update = false) {
+           CudaStageTimings* timings, bool tiled_update = false,
+           bool parallel_count = false,
+           CudaCountValidation* count_validation = nullptr) {
     const auto wall_start = Clock::now();
     validate(input, n, d, k, max_updates);
 
@@ -307,6 +341,7 @@ Result run(const std::vector<float>& input, std::size_t n,
     const int cluster_blocks = (ki + block_size - 1) / block_size;
     const int tile_count = (ni + reduction_tile_samples - 1) /
                            reduction_tile_samples;
+    const int count_tiles = (ni + count_tile_samples - 1) / count_tile_samples;
     Result result;
 
     {
@@ -322,6 +357,18 @@ Result run(const std::vector<float>& input, std::size_t n,
         if (tiled_update) {
             partials = std::make_unique<DeviceBuffer<double>>(
                 static_cast<std::size_t>(ki) * di * tile_count);
+        }
+        std::unique_ptr<DeviceBuffer<int>> count_partials;
+        std::unique_ptr<DeviceBuffer<int>> shadow_counts;
+        std::vector<int> actual_counts, expected_counts;
+        if (parallel_count) {
+            count_partials = std::make_unique<DeviceBuffer<int>>(
+                static_cast<std::size_t>(count_tiles) * ki);
+        }
+        if (count_validation != nullptr) {
+            shadow_counts = std::make_unique<DeviceBuffer<int>>(k);
+            actual_counts.resize(k);
+            expected_counts.resize(k);
         }
         if (timings != nullptr) {
             timings->setup_ms = elapsed_ms(setup_start, Clock::now());
@@ -351,10 +398,47 @@ Result run(const std::vector<float>& input, std::size_t n,
         bool converged = false;
         for (std::size_t pass = 1; pass <= max_updates; ++pass) {
             stage(events, timings, &CudaStageTimings::count_ms, [&] {
-                count_clusters<<<cluster_blocks, block_size>>>(
-                    current_labels, device_counts.get(), ni, ki);
+                if (parallel_count) {
+                    count_tile_partials<<<count_tiles, block_size>>>(
+                        current_labels, count_partials->get(), ni, ki);
+                    check_launch("count tile partials launch");
+                    finalize_counts<<<cluster_blocks, block_size>>>(
+                        count_partials->get(), device_counts.get(),
+                        count_tiles, ki);
+                } else {
+                    count_clusters<<<cluster_blocks, block_size>>>(
+                        current_labels, device_counts.get(), ni, ki);
+                }
                 check_launch("cluster count launch");
             });
+            if (count_validation != nullptr) {
+                // Compare the exact labels consumed by this update, before
+                // reassignment. Final returned labels can differ at a cap.
+                count_clusters<<<cluster_blocks, block_size>>>(
+                    current_labels, shadow_counts->get(), ni, ki);
+                check_launch("count validation control launch");
+                check(cudaMemcpy(actual_counts.data(), device_counts.get(),
+                                 k * sizeof(int), cudaMemcpyDeviceToHost),
+                      "candidate count validation D2H");
+                check(cudaMemcpy(expected_counts.data(), shadow_counts->get(),
+                                 k * sizeof(int), cudaMemcpyDeviceToHost),
+                      "control count validation D2H");
+                int total = 0;
+                for (std::size_t cluster = 0; cluster < k; ++cluster) {
+                    if (actual_counts[cluster] != expected_counts[cluster]) {
+                        throw std::runtime_error(
+                            "parallel count mismatch at Lloyd update " +
+                            std::to_string(pass) + ", cluster " +
+                            std::to_string(cluster));
+                    }
+                    total += actual_counts[cluster];
+                }
+                if (total != ni) {
+                    throw std::runtime_error("cluster counts do not total N");
+                }
+                ++count_validation->updates_checked;
+                count_validation->count_values_checked += k;
+            }
             stage(events, timings, &CudaStageTimings::centroid_update_ms, [&] {
                 if (tiled_update) {
                     centroid_tile_partials<<<dim3(tile_count, ki * di),
@@ -474,6 +558,134 @@ CudaRun kmeans_cuda_tiled_diagnostic(const std::vector<float>& input,
                                      std::size_t max_updates) {
     CudaRun output;
     output.result = run(input, n, d, k, max_updates, &output.timings, true);
+    return output;
+}
+
+Result kmeans_cuda_parallel_count(const std::vector<float>& input, std::size_t n,
+                                  std::size_t d, std::size_t k) {
+    return run(input, n, d, k, 100, nullptr, true, true);
+}
+
+Result kmeans_cuda_parallel_count_with_update_cap(
+    const std::vector<float>& input, std::size_t n, std::size_t d,
+    std::size_t k, std::size_t max_updates) {
+    return run(input, n, d, k, max_updates, nullptr, true, true);
+}
+
+CudaRun kmeans_cuda_parallel_count_diagnostic(
+    const std::vector<float>& input, std::size_t n, std::size_t d,
+    std::size_t k, std::size_t max_updates) {
+    CudaRun output;
+    output.result = run(input, n, d, k, max_updates, &output.timings, true, true);
+    return output;
+}
+
+CudaCountValidation kmeans_cuda_parallel_count_checked(
+    const std::vector<float>& input, std::size_t n, std::size_t d,
+    std::size_t k, std::size_t max_updates) {
+    CudaCountValidation output;
+    output.result = run(input, n, d, k, max_updates, nullptr, true, true, &output);
+    return output;
+}
+
+CudaCountPairTimings benchmark_cuda_count_pair(
+    const std::vector<std::int32_t>& labels, std::size_t k, std::size_t rounds) {
+    const auto n = labels.size();
+    if (n < 2 || n > max_n || k < 2 || k > max_k || k > n ||
+        (rounds != 0 && (rounds < 7 || rounds > 50))) {
+        throw std::invalid_argument("invalid count labels, K, or timing rounds");
+    }
+    std::vector<std::int32_t> expected(k, 0);
+    for (const auto label : labels) {
+        if (label < 0 || static_cast<std::size_t>(label) >= k) {
+            throw std::invalid_argument("count label outside [0,K)");
+        }
+        ++expected[static_cast<std::size_t>(label)];
+    }
+    const int ni = static_cast<int>(n);
+    const int ki = static_cast<int>(k);
+    const int count_tiles = (ni + count_tile_samples - 1) / count_tile_samples;
+    DeviceBuffer<int> device_labels(n);
+    DeviceBuffer<int> control_counts(k);
+    DeviceBuffer<int> parallel_counts(k);
+    DeviceBuffer<int> partials(static_cast<std::size_t>(count_tiles) * k);
+    EventTriplet events;
+    check(cudaMemcpy(device_labels.get(), labels.data(), n * sizeof(int),
+                     cudaMemcpyHostToDevice), "direct count labels H2D");
+    const auto launch_control = [&] {
+        count_clusters<<<1, block_size>>>(
+            device_labels.get(), control_counts.get(), ni, ki);
+        check_launch("direct count control launch");
+    };
+    const auto launch_parallel = [&] {
+        count_tile_partials<<<count_tiles, block_size>>>(
+            device_labels.get(), partials.get(), ni, ki);
+        check_launch("direct count partial launch");
+        finalize_counts<<<1, block_size>>>(
+            partials.get(), parallel_counts.get(), count_tiles, ki);
+        check_launch("direct count final launch");
+    };
+    CudaCountPairTimings output;
+    output.control_counts.resize(k);
+    output.parallel_counts.resize(k);
+    const auto verify_counts = [&] {
+        check(cudaMemcpy(output.control_counts.data(), control_counts.get(),
+                         k * sizeof(int), cudaMemcpyDeviceToHost),
+              "direct control counts D2H");
+        check(cudaMemcpy(output.parallel_counts.data(), parallel_counts.get(),
+                         k * sizeof(int), cudaMemcpyDeviceToHost),
+              "direct parallel counts D2H");
+        if (output.control_counts != expected ||
+            output.parallel_counts != expected) {
+            throw std::runtime_error("direct count result differs from CPU histogram");
+        }
+    };
+    for (int warmup = 0; warmup < 2; ++warmup) {
+        launch_control();
+        launch_parallel();
+        verify_counts();  // Both repeats must equal the same exact histogram.
+    }
+    for (std::size_t round = 0; round < rounds; ++round) {
+        const auto time_control = [&] {
+            check(cudaEventRecord(events.first()), "count control event start");
+            launch_control();
+            check(cudaEventRecord(events.last()), "count control event stop");
+            check(cudaEventSynchronize(events.last()), "count control event sync");
+            output.control_ms.push_back(event_ms(events.first(), events.last()));
+        };
+        const auto time_parallel = [&] {
+            check(cudaEventRecord(events.first()), "parallel count event start");
+            launch_parallel();  // No event or host synchronization between A/B.
+            check(cudaEventRecord(events.last()), "parallel count event stop");
+            check(cudaEventSynchronize(events.last()), "parallel count event sync");
+            output.parallel_ms.push_back(event_ms(events.first(), events.last()));
+        };
+        if (round % 2 == 0) {
+            time_control();
+            time_parallel();
+        } else {
+            time_parallel();
+            time_control();
+        }
+    }
+    verify_counts();
+    // Component timing is a separate diagnostic sequence. The extra event
+    // between these short kernels must not affect the primary paired total.
+    for (std::size_t round = 0; round < rounds; ++round) {
+        check(cudaEventRecord(events.first()), "count partial event start");
+        count_tile_partials<<<count_tiles, block_size>>>(
+            device_labels.get(), partials.get(), ni, ki);
+        check_launch("count partial component launch");
+        check(cudaEventRecord(events.middle()), "count partial event stop");
+        finalize_counts<<<1, block_size>>>(
+            partials.get(), parallel_counts.get(), count_tiles, ki);
+        check_launch("count final component launch");
+        check(cudaEventRecord(events.last()), "count final event stop");
+        check(cudaEventSynchronize(events.last()), "count component event sync");
+        output.partial_ms.push_back(event_ms(events.first(), events.middle()));
+        output.finalize_ms.push_back(event_ms(events.middle(), events.last()));
+    }
+    verify_counts();
     return output;
 }
 

@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, and deterministic tiled FP64 centroid reduction are complete. Parallel integer counting is the next isolated CUDA experiment.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, deterministic tiled FP64 centroid reduction, and parallel integer counting are complete. Transfer/residency and native host-overhead characterization is next.
 
 ## Why this project exists
 
@@ -228,9 +228,62 @@ Normal whole-fit Release `steady_clock` comparisons included allocations, valida
 
 A focused Nsight Compute 2025.2.1 check on a warmed normal Stage-A launch found 39 registers/thread, 2 KiB static shared memory/block, zero local load/store sectors, 98.71% occupancy (47.38 active warps/SM), 86.88% device-wide SM throughput, 6.50% DRAM throughput, and 91.06% cycles with no eligible scheduler warp; L1TEX-queue throttle dominated at about 62.2% of cycles per issued instruction. Stage B had 36 registers/thread and one block, so still underfills the GPU, but its direct-event median was only ~1% of candidate update time. The grid-wide occupancy/SM-throughput change and shorter per-thread sum chains support the speedup; no logical `N·K·D` label scans were eliminated, and the relative contribution of those two improvements was not isolated. The candidate is retained. The now-unchanged count kernel costs about 3.02 ms on the GPU and 4.62 ms cumulatively over 22 iterative updates, exceeding the new centroid-update cost; isolated parallel integer counting is next.
 
+### Isolated CUDA experiment — parallel integer cluster counting
+
+The retained `kmeans_cuda_parallel_count` path changes only counting relative to `kmeans_cuda_tiled`, which remains callable with its original serial-scan count kernel. Assignment, tiled FP64 centroid reduction, layout, convergence, and Lloyd semantics are unchanged. Stage A assigns one 256-thread block to each 1,024-label tile. Threads cooperatively initialize a 32-integer shared histogram, load up to four labels each, and increment block-local counters with exact integer atomics; after a barrier they write `partials[tile*K+cluster]`. There are no global atomics. Stage B uses one 256-thread block, with its first `K` threads adding partials in ascending tile order. Empty clusters remain zero; partial tiles are guarded. Each label is inspected once rather than `K` times. The frozen `N <= 2^20` bound prevents count overflow regardless of atomic order.
+
+On the GPU workload `(262,144,16,16)`, Stage A has 256 blocks and Stage B has 16 useful workers. Count scratch is `4*ceil(N/1024)*K` bytes: 16 KiB here, 4 KiB primary, 512 bytes iterative, and at most 128 KiB under the contract. The unchanged centroid scratch adds 128 KiB on the GPU workload (144 KiB combined). Stage A uses 128 bytes of static shared memory/block; Stage B uses none.
+
+**Correctness:** an untimed validation-only fit compares candidate and control counts on the actual labels consumed by **every** Lloyd update, before reassignment, and checks their sum equals `N`. All six public fixtures (96 labels; eight update passes and 18 cluster-count comparisons) pass, including reduced-cap semantics. Primary/GPU/iterative workloads check 1/1/22 passes and 16/16/176 cluster counts. Labels, centroid bits, update counts, flags, repeated results, and input immutability match the retained tiled path; centroid absolute/scaled error and independently recomputed inertia error versus NumPy are zero on all three workloads. Forty additional known-label cases cover K=2/32, N=1023/1024/1025/4097/2^20, empty clusters, all-in-one clusters, cyclic labels, and extreme imbalance. Complete-fit tile edges, signed zero, subnormals, and existing serial/OpenMP/CUDA contract tests also pass. The frozen centroid/inertia tolerances remain unchanged.
+
+**Timing:** AC-powered RTX 4070 Laptop GPU, driver 610.88, CUDA 12.9, `sm_89`, MSVC Release `/O2`, unchanged `--fmad=false`. Persistent direct-count buffers/events and label upload precede timing; two warm-ups per variant precede eight alternating AB/BA pairs. Candidate timing encloses both kernels with two events and no midpoint event/synchronization. A second eight-pair block confirms the result; pooled medians retain all 16 observations. Component timings use separate launches with an extra midpoint event, so their sums/fractions are only approximate. GPU-workload raw count times (ms):
+
+| Block | Control | Parallel |
+| --- | --- | --- |
+| First | 3.172128, 3.164160, 3.164992, 3.164992, 3.173184, 3.164160, 3.169024, 3.163136 | 0.025600, 0.012288, 0.026624, 0.030688, 0.022528, 0.012128, 0.013312, 0.011264 |
+| Confirmation | 3.169664, 3.172256, 3.175328, 3.164160, 3.189760, 3.164928, 3.187552, 3.164160 | 0.059552, 0.030560, 0.025600, 0.011264, 0.028672, 0.013312, 0.029696, 0.013120 |
+
+| Direct-count workload | Control min / median / max (ms) | Parallel min / median / max (ms) | Median speedup |
+| --- | ---: | ---: | ---: |
+| Primary | 0.794624 / 0.795648 / 0.808960 | 0.008192 / 0.011808 / 0.034816 | 67.382× |
+| GPU | 3.163136 / 3.167008 / 3.189760 | 0.011264 / 0.024064 / 0.059552 | 131.608× |
+| Iterative, fixed final labels / one count | 0.202752 / 0.209920 / 0.229824 | 0.011264 / 0.013888 / 0.039936 | 15.115× |
+
+The GPU count reduction is 99.240%; separate block speedups are 176.618× and 116.854×. The very short candidate launches remain variable, but the large gain repeats. Five separate diagnostic fits measure **cumulative** count over all 22 iterative updates at 4.959296 ms control versus 0.702400 ms parallel; the fixed-label direct microbenchmark is not that cumulative total.
+
+Normal whole-fit `steady_clock` calls include validation, allocation, H2D, computation, D2H, and teardown; checks and I/O remain outside. Each of two eight-round blocks uses three CUDA warm-ups and one CPU warm-up, adjacent AB/BA CUDA fits, and fresh OpenMP-8 controls in the same session. Pooled 16-run medians:
+
+| Workload | Control / parallel / OpenMP-8 (ms) | Control / parallel speedup | OpenMP-8 / parallel speedup |
+| --- | ---: | ---: | ---: |
+| Primary `(65,536,8,16)` | 2.854500 / 2.036050 / 2.789000 | 1.402× | 1.370× |
+| GPU `(262,144,16,16)` | 14.240450 / 10.863650 / 17.775350 | 1.311× | 1.636× |
+| Iterative `(16,384,8,8)`, 22 updates | 7.212000 / 2.777600 / 4.694850 | 2.596× | 1.690× |
+
+First/confirmation block whole-fit speedups are 1.433×/1.386× primary, 1.336×/1.345× GPU, and 2.639×/2.421× iterative. An initial iterative candidate call took 12.6178 ms; confirmation candidate calls ranged 2.5973–3.4553 ms. No sample was deleted. These results support retention, not universal CPU/GPU crossover claims.
+
+**Focused profile:** Nsight Compute 2025.2.1, separate normal-optimization `-lineinfo` build, one warmed Stage-A/Stage-B launch after four matching launches (untimed audit plus three warm-ups). Focused launch/occupancy/scheduler/stall/memory/source sections were collected, not a full metric set. Default cache-flushing replay and `--cache-control none` were both checked because count normally consumes labels just written by assignment. Cache-none replay is not a perfectly controlled cache state; neither profiler durations nor profiled native wall time are benchmark results.
+
+| Candidate metric | Stage A, cache-none replay | Stage B, cache-none replay |
+| --- | ---: | ---: |
+| Blocks × threads; registers/thread | 256 × 256; 16 | 1 × 256; 40 |
+| Static / dynamic shared bytes; local load/store sectors | 128 / 0; 0 / 0 | 0 / 0; sectors not collected |
+| Theoretical / achieved occupancy; active warps/active SM | 100% / 76.38%; 36.66 | 100% / 3.20%; 1.54 |
+| SM / DRAM throughput (% peak) | 23.80 / 0.00 | 0.16 / 1.11 |
+| Scheduler cycles without eligible warp | 68.76% | 91.10% |
+
+Stage A has 0.96 eligible warps/scheduler and 100% branch efficiency. Long-scoreboard, immediate-constant-cache miss, and barrier stalls account for about 31.3%, 18.2%, and 10.5% of warp cycles per issued instruction; MIO throttle is 3.7%. L1/L2 hit rates are 0.40%/99.03%. With default cache flushing, Stage A instead has 73.92% occupancy, 9.13% SM throughput, 65.86% DRAM throughput, 3.62% L2 hits, and 91.38% no-eligible cycles: cold memory demand is substantial, but does not establish a sustained bandwidth bottleneck after assignment. Source counters show 8,192 warp label-load requests covering 32,768 ideal 32-byte sectors (four sectors/warp, full sector utilization); partial stores add 512 sectors. Actual address-footprint sectors equal ideal sectors, with no excess. These are coalescing/sector-use metrics, not DRAM-miss byte counts.
+
+Stage B still underfills the GPU. Separate direct Stage-A/Stage-B component medians are 0.007168/0.009216 ms, so finalization is roughly half the short instrumented sequence; launch/event jitter prevents precise fractional accounting. The warm profile indicates mixed latency and short-grid/launch effects, not evidence that shared atomics dominate. Increased grid parallelism, eliminating redundant full-N scans, and block-local aggregation plausibly explain the gain; their individual contributions were not isolated.
+
+Fresh five-fit candidate diagnostic medians (ms) are setup 0.242200, H2D 1.505920, initialization 0.035136, first assignment 0.479200, count 0.020480, centroid update 1.247232, reassignment 0.478208, convergence flag reset/D2H 0.035968, final D2H 0.176000, and device algorithm 2.268288. The one-shot GPU-path sum is 4.010240 ms. Device algorithm excludes flag D2H; one-shot GPU includes it and transfers, but not allocation/validation/teardown. Separate medians do not necessarily add and are not the normal whole-fit denominator. Count is now about 0.9% of device-algorithm time; centroid update and assignment dominate device work.
+
+Ranked remaining opportunities: (1) characterize transfers/residency and native validation/setup/teardown/launch overhead; (2) centroid Stage-A load/stall optimization; (3) assignment optimization. **Exactly one next experiment:** transfer/residency and native host-overhead characterization, because 10.864 ms normal whole-fit versus 2.268 ms device-algorithm diagnostics leaves a larger end-to-end question than further count tuning. This comparison motivates measurement; subtracting independent medians would not precisely attribute that gap. Count/sum fusion is low priority at the measured count share. No next optimization was implemented. Linux, broad size scaling, and general crossover remain unvalidated.
+
+Reproduce after the existing Release build with `python -B 03_CUDA_KMeans/python/benchmark_cuda.py PATH_TO_EXE all --compare-count --diagnostic-runs 5`; repeat `primary`, `gpu`, and `iterative` with `--compare-count --diagnostic-runs 0` for confirmation. The driver prints raw runs and correctness evidence. Default and `--compare-tiled` validation remain available; comparison modes are mutually exclusive. Generated inputs, timing outputs, profiler reports, and builds remain ignored.
+
 ## Planned workflow
 
-Next: test isolated parallel integer counting against the unchanged count kernel and retained tiled centroid update. Python integration, broader size scaling, and library comparisons follow native CUDA architecture evaluation.
+Next: characterize transfer/residency and native host overhead without changing the retained kernels. Python integration, broader size scaling, and library comparisons follow native CUDA architecture evaluation.
 
 ## Primary learning goals
 
@@ -268,10 +321,10 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, and deterministic tiled centroid reduction are complete. The two-feature distance-pipeline experiment was rejected; isolated parallel integer counting is next. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, deterministic tiled centroid reduction, and parallel integer counting are complete. The two-feature distance-pipeline experiment was rejected; transfer/residency and native host-overhead characterization is next. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
 - **TBD:** Explain the historical-versus-fresh baseline timing difference; broader independent size/stage scaling remains future work.
-- **TBD:** Validate and benchmark a parallel integer count separately; later CUDA layout and fusion decisions remain open.
+- **TBD:** Separate transfer/residency and native host overhead, then establish CPU/GPU crossover; later CUDA layout and fusion decisions remain open.
 - **TBD:** Availability and fair configuration of external libraries; binding approach.

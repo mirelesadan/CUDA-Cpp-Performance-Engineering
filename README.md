@@ -2,7 +2,7 @@
 
 This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phases A and B are complete** for their established finite-`float64` Windows contracts. Phase A took a four-dimensional fixed median from an authoritative Python/4Denoise reference through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B extended that process to adaptive median filtering, ending with validated persistent adaptive CUDA ownership for Python.
 
-The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means: its Python reference, serial C++ baseline, native profile, measured assignment-addressing improvement, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, and retained deterministic tiled FP64 centroid reduction are complete. The tested candidate preserved exact labels/termination and met the frozen centroid/inertia tolerances; it also happened to match centroid bits on all measured workloads. Parallel integer counting is next. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
+The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means: its Python reference, serial C++ baseline, native profile, measured assignment-addressing improvement, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, deterministic tiled FP64 centroid reduction, and parallel integer counting are complete. The retained count path preserves exact per-update counts, labels/termination, and centroid bits on the tested workloads. Transfer/residency and native host-overhead characterization is next. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
 
 ## Current status
 
@@ -36,7 +36,7 @@ The retained Phase B split CUDA path includes a measured balanced nine-value min
 | Phase B adaptive CUDA transfers/residency | Complete | Pageable/pinned one-shot paths and repeated full-device operations measured with exact outputs |
 | Phase B persistent adaptive Python CUDA owner | Complete | Exact public/local/subset/canonical outputs; 20 resident Python calls reached 28.221 ms/filter |
 | Phase B closeout | Complete | Reference, native CPU/OpenMP, profiled CUDA, transfer study, and Python workflow validated together |
-| Project 2 — K-means | Deterministic tiled CUDA centroid reduction retained; count experiment next | The GPU-workload update median fell from 33.512 to 1.202 ms (27.879×); full CUDA fit improved 3.527× against its fresh control |
+| Project 2 — K-means | Parallel integer counting retained; transfer/residency next | GPU-workload count fell from 3.167 to 0.024 ms (131.608×); full fit took 10.864 ms, 1.636× faster than fresh OpenMP-8 |
 | Project 3 — matrix/tensor multiplication | Planned | Operation and validation details remain TBD |
 | 3D-median concept | Deferred | Revisit only if a distinct scientific transformation and new performance question are established |
 
@@ -96,7 +96,8 @@ Python reference
   → Project 2 correctness-first CUDA [complete]
   → Project 2 CUDA count/update profiling [complete]
   → Project 2 deterministic centroid reduction [complete]
-  → Project 2 parallel integer count experiment [next]
+  → Project 2 parallel integer count experiment [complete]
+  → Project 2 transfer/residency and native host-overhead characterization [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.

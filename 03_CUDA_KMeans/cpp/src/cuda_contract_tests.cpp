@@ -114,6 +114,32 @@ void require_frozen_contract(const kmeans::Result& actual,
     }
 }
 
+void require_parallel_count_fit(const std::vector<float>& input, std::size_t n,
+                                std::size_t d, std::size_t k, std::size_t cap,
+                                const kmeans::Result& tiled,
+                                const std::string& context) {
+    const auto before = input;
+    const auto checked =
+        kmeans::kmeans_cuda_parallel_count_checked(input, n, d, k, cap);
+    auto normal = kmeans::kmeans_cuda_parallel_count_with_update_cap(
+        input, n, d, k, cap);
+    const auto repeat = kmeans::kmeans_cuda_parallel_count_with_update_cap(
+        input, n, d, k, cap);
+    require_equal(checked.result, tiled, context + ": checked count fit");
+    require_equal(normal, tiled, context + ": normal count fit");
+    require_equal(repeat, normal, context + ": count fit repeat");
+    require(checked.updates_checked == tiled.update_count,
+            context + ": missing count audit pass");
+    require(checked.count_values_checked == k * tiled.update_count,
+            context + ": missing cluster count comparison");
+    require(std::memcmp(input.data(), before.data(),
+                        input.size() * sizeof(float)) == 0,
+            context + ": parallel count input changed");
+    normal.labels[0] = -1;
+    normal.centroids[0] = 99.0f;
+    require_equal(repeat, tiled, context + ": independent count-fit output");
+}
+
 double validation_inertia(const Fixture& fixture, const kmeans::Result& result) {
     // The validation metric uses double-precision distances; this is separate
     // from the frozen ordered-FP32 arithmetic used to assign labels.
@@ -188,6 +214,8 @@ void test_public_fixtures() {
         const auto tiled_repeat = kmeans::kmeans_cuda_tiled_with_update_cap(
             fixture.input, n, fixture.d, fixture.k, fixture.update_cap);
         const std::string context = fixture.name;
+        require_parallel_count_fit(fixture.input, n, fixture.d, fixture.k,
+                                   fixture.update_cap, tiled, context);
         require_equal(cuda, serial, context + ": addressed serial parity");
         require_equal(repeat, cuda, context + ": repeatability");
         require_frozen_contract(tiled, serial, fixture.input, fixture.d,
@@ -253,6 +281,7 @@ void test_feature_and_cluster_edges() {
     require_equal(odd_cuda, odd_serial, "D=3 odd-feature order");
     require_frozen_contract(odd_tiled, odd_serial, odd, 3, 2,
                             "D=3 tiled odd-feature order");
+    require_parallel_count_fit(odd, 16, 3, 2, 100, odd_tiled, "D=3");
 
     std::vector<float> even;
     for (int sample = 0; sample < 64; ++sample) {
@@ -269,6 +298,8 @@ void test_feature_and_cluster_edges() {
         require_equal(cuda, serial, "D=4 K=" + std::to_string(k));
         require_frozen_contract(tiled, serial, even, 4, k,
                                 "D=4 tiled K=" + std::to_string(k));
+        require_parallel_count_fit(even, 64, 4, k, 100, tiled,
+                                   "D=4 K=" + std::to_string(k));
     }
     require(std::memcmp(even.data(), before.data(),
                         even.size() * sizeof(float)) == 0,
@@ -277,9 +308,9 @@ void test_feature_and_cluster_edges() {
 }
 
 void test_tiled_boundaries() {
-    for (const std::size_t n : {4095u, 4096u, 4097u, 8193u}) {
-        const std::size_t d = n == 4097 ? 32u : 3u;
-        const std::size_t k = n == 4097 ? 32u : 2u;
+    for (const std::size_t n : {1023u, 1024u, 1025u, 4095u, 4096u, 4097u, 8193u}) {
+        const std::size_t d = n == 1025 || n == 4097 ? 32u : 3u;
+        const std::size_t k = n == 1025 || n == 4097 ? 32u : 2u;
         std::vector<float> input(n * d);
         for (std::size_t sample = 0; sample < n; ++sample) {
             const auto cluster = sample * k / n;
@@ -297,11 +328,62 @@ void test_tiled_boundaries() {
         const auto context = "tile boundary N=" + std::to_string(n);
         require_frozen_contract(tiled, reference, input, d, k, context);
         require_equal(repeat, tiled, context + ": deterministic repeat");
+        require_parallel_count_fit(input, n, d, k, 100, tiled, context);
         require(std::memcmp(input.data(), before.data(),
                             input.size() * sizeof(float)) == 0,
                 context + ": input changed");
     }
-    std::cout << "Project 2 CUDA tiled boundaries passed: N=4095/4096/4097/8193, D=3/32, K=2/32\n";
+    std::cout << "Project 2 CUDA count/centroid tile boundaries passed: "
+              << "N=1023/1024/1025/4095/4096/4097/8193, D=3/32, K=2/32\n";
+}
+
+void test_integer_counts() {
+    std::size_t cases = 0;
+    for (const std::size_t k : {2u, 32u}) {
+        for (const std::size_t n : {1023u, 1024u, 1025u, 4097u, 1u << 20}) {
+            for (int pattern = 0; pattern < 4; ++pattern) {
+                std::vector<std::int32_t> labels(n, 0);
+                for (std::size_t sample = 0; sample < n; ++sample) {
+                    if (pattern == 1) labels[sample] = static_cast<int>(k - 1);
+                    if (pattern == 2) labels[sample] = static_cast<int>(sample % k);
+                }
+                if (pattern == 3) labels.back() = static_cast<int>(k - 1);
+                const auto before = labels;
+                std::vector<std::int32_t> expected(k, 0);
+                for (const auto label : labels) ++expected[label];
+                const auto actual = kmeans::benchmark_cuda_count_pair(labels, k, 0);
+                require(actual.control_counts == expected, "standalone control count");
+                require(actual.parallel_counts == expected, "standalone parallel count");
+                require(labels == before, "standalone count input changed");
+                require(actual.control_ms.empty() && actual.parallel_ms.empty(),
+                        "validation-only count path unexpectedly timed");
+                ++cases;
+            }
+        }
+    }
+    // Complete fits with one populated cluster verify unchanged empty-centroid
+    // retention as well as the direct all-in-one-bin histograms above.
+    const std::vector<float> identical(1025 * 3, -0.0f);
+    const auto serial = kmeans::kmeans_serial_addressed(identical, 1025, 3, 32);
+    const auto tiled = kmeans::kmeans_cuda_tiled(identical, 1025, 3, 32);
+    require_frozen_contract(tiled, serial, identical, 3, 32, "identical samples");
+    require_parallel_count_fit(identical, 1025, 3, 32, 100, tiled,
+                               "identical samples / empty clusters");
+    require_rejected([&] {
+        kmeans::benchmark_cuda_count_pair({0, -1}, 2, 0);
+    }, "negative label");
+    require_rejected([&] {
+        kmeans::benchmark_cuda_count_pair({0, 2}, 2, 0);
+    }, "label >= K");
+    require_rejected([&] {
+        kmeans::benchmark_cuda_count_pair({0, 0}, 1, 0);
+    }, "count K=1");
+    require_rejected([&] {
+        kmeans::benchmark_cuda_count_pair({0, 1}, 2, 1);
+    }, "count timing rounds below seven");
+    std::cout << "Project 2 parallel integer counts passed: " << cases
+              << " known-label cases; empty, single-bin, balanced, skewed, "
+              << "partial tiles, max N, and every checked Lloyd pass exact\n";
 }
 
 void test_invalid_inputs() {
@@ -338,6 +420,7 @@ int main() {
         test_public_fixtures();
         test_feature_and_cluster_edges();
         test_tiled_boundaries();
+        test_integer_counts();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Project 2 CUDA contract test failed: "

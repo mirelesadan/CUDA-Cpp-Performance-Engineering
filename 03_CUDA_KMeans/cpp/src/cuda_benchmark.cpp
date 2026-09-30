@@ -145,7 +145,8 @@ int main(int argc, char** argv) {
                 "usage: phase2_kmeans_cuda_benchmark input.f32 N D K labels.i32 "
                 "centroids.f32 [--runs 0..50] [--diagnostic-runs 0..20] "
                 "[--test-update-cap 1..100] [--skip-serial 0|1] "
-                "[--compare-tiled 0|1] [--update-pairs 0|7..50]");
+                "[--compare-tiled 0|1] [--update-pairs 0|7..50] "
+                "[--compare-count 0|1] [--count-pairs 0|7..50]");
         }
         const auto n = parse_size(argv[2], "N");
         const auto d = parse_size(argv[3], "D");
@@ -159,7 +160,9 @@ int main(int argc, char** argv) {
         std::size_t update_cap = 100;
         bool skip_serial = false;
         bool compare_tiled = false;
+        bool compare_count = false;
         std::size_t update_pairs = 0;
+        std::size_t count_pairs = 0;
         for (int arg = 7; arg < argc; arg += 2) {
             const std::string option(argv[arg]);
             const auto value = parse_size(argv[arg + 1], option.c_str());
@@ -174,9 +177,14 @@ int main(int argc, char** argv) {
                 skip_serial = value != 0;
             } else if (option == "--compare-tiled" && value <= 1) {
                 compare_tiled = value != 0;
+            } else if (option == "--compare-count" && value <= 1) {
+                compare_count = value != 0;
             } else if (option == "--update-pairs" &&
                        (value == 0 || (value >= 7 && value <= 50))) {
                 update_pairs = value;
+            } else if (option == "--count-pairs" &&
+                       (value == 0 || (value >= 7 && value <= 50))) {
+                count_pairs = value;
             } else {
                 throw std::invalid_argument("unknown option or invalid value: " + option);
             }
@@ -184,6 +192,12 @@ int main(int argc, char** argv) {
         if (update_pairs != 0 && !compare_tiled) {
             throw std::invalid_argument("--update-pairs requires --compare-tiled 1");
         }
+        if ((compare_count && compare_tiled) || (count_pairs && !compare_count)) {
+            throw std::invalid_argument(
+                "count comparison is separate from tiled comparison; "
+                "--count-pairs requires --compare-count 1");
+        }
+        const bool compare_candidate = compare_tiled || compare_count;
 
         // Raw-file I/O and correctness comparisons are outside the fit timer.
         // Every normal CUDA fit owns device allocation, transfer and teardown.
@@ -202,12 +216,20 @@ int main(int argc, char** argv) {
                       input, n, d, k, update_cap, 8);
         };
         const auto cuda_fit = [&] {
+            if (compare_count) {
+                return kmeans::kmeans_cuda_tiled_with_update_cap(
+                    input, n, d, k, update_cap);
+            }
             return update_cap == 100
                 ? kmeans::kmeans_cuda(input, n, d, k)
                 : kmeans::kmeans_cuda_with_update_cap(
                       input, n, d, k, update_cap);
         };
         const auto tiled_fit = [&] {
+            if (compare_count) {
+                return kmeans::kmeans_cuda_parallel_count_with_update_cap(
+                    input, n, d, k, update_cap);
+            }
             return update_cap == 100
                 ? kmeans::kmeans_cuda_tiled(input, n, d, k)
                 : kmeans::kmeans_cuda_tiled_with_update_cap(
@@ -217,28 +239,49 @@ int main(int argc, char** argv) {
         const auto reference = serial_fit();
         auto serial_result = reference;
         auto openmp_result = openmp_fit();
-        auto cuda_result = cuda_fit();
+        kmeans::CudaCountValidation count_validation;
+        if (compare_count) {
+            count_validation = kmeans::kmeans_cuda_parallel_count_checked(
+                input, n, d, k, update_cap);
+            if (!same_frozen_contract(reference, count_validation.result,
+                                      input, n, d, k) ||
+                count_validation.updates_checked !=
+                    count_validation.result.update_count ||
+                count_validation.count_values_checked !=
+                    k * count_validation.updates_checked) {
+                throw std::runtime_error("per-update count validation failed");
+            }
+        }
+        const auto cuda_reference = cuda_fit();
+        auto cuda_result = cuda_reference;
         if (!same_bits(reference, openmp_result) ||
-            !same_bits(reference, cuda_result)) {
-            throw std::runtime_error("serial/OpenMP-8/CUDA outputs differ bitwise");
+            !(compare_count
+                  ? same_frozen_contract(reference, cuda_result, input, n, d, k)
+                  : same_bits(reference, cuda_result))) {
+            throw std::runtime_error("CPU/CUDA control violates reference contract");
         }
         kmeans::Result tiled_reference;
         kmeans::Result tiled_result;
-        if (compare_tiled) {
+        if (compare_candidate) {
             tiled_reference = tiled_fit();
             tiled_result = tiled_reference;
             if (!same_frozen_contract(reference, tiled_reference,
                                       input, n, d, k)) {
                 throw std::runtime_error("tiled CUDA violates frozen contract");
             }
+            if (compare_count &&
+                (!same_bits(cuda_reference, tiled_reference) ||
+                 !same_bits(cuda_reference, count_validation.result))) {
+                throw std::runtime_error("parallel count changed retained CUDA output");
+            }
         }
         const std::size_t cuda_warmups = runs ? 3 : 1;
         for (std::size_t i = 1; i < cuda_warmups; ++i) {
             cuda_result = cuda_fit();
-            if (!same_bits(reference, cuda_result)) {
+            if (!same_bits(cuda_reference, cuda_result)) {
                 throw std::runtime_error("CUDA warm-up output differs bitwise");
             }
-            if (compare_tiled) {
+            if (compare_candidate) {
                 tiled_result = tiled_fit();
                 if (!same_bits(tiled_reference, tiled_result)) {
                     throw std::runtime_error("tiled CUDA warm-up not deterministic");
@@ -248,42 +291,37 @@ int main(int argc, char** argv) {
 
         std::vector<double> serial_times, openmp_times, cuda_times, tiled_times;
         const auto time_fit = [&](const auto& fit, kmeans::Result& result,
-                                  bool tiled) {
+                                  const kmeans::Result& expected) {
             const auto start = std::chrono::steady_clock::now();
             auto next = fit();
             const auto end = std::chrono::steady_clock::now();
             result = std::move(next);
-            if (tiled) {
-                // The full contract was checked before timing. Keep the
-                // post-call check symmetric with the control variants.
-                if (!same_bits(tiled_reference, result)) {
-                    throw std::runtime_error(
-                        "timed tiled output is not deterministic");
-                }
-            } else if (!same_bits(reference, result)) {
-                throw std::runtime_error("timed control differs bitwise from serial");
+            // Full reference/count checks precede timing. All timed variants
+            // receive the same untimed bitwise self-repeat check.
+            if (!same_bits(expected, result)) {
+                throw std::runtime_error("timed fit output is not deterministic");
             }
             return std::chrono::duration<double, std::milli>(end - start).count();
         };
         for (std::size_t round = 0; round < runs; ++round) {
-            if (compare_tiled) {
+            if (compare_candidate) {
                 // Pair the two GPU fits adjacently and reverse their order on
                 // alternate rounds. CPU controls stay in the same session.
                 if (round % 2 == 0) {
-                    cuda_times.push_back(time_fit(cuda_fit, cuda_result, false));
-                    tiled_times.push_back(time_fit(tiled_fit, tiled_result, true));
+                    cuda_times.push_back(time_fit(cuda_fit, cuda_result, cuda_reference));
+                    tiled_times.push_back(time_fit(tiled_fit, tiled_result, tiled_reference));
                 } else {
-                    tiled_times.push_back(time_fit(tiled_fit, tiled_result, true));
-                    cuda_times.push_back(time_fit(cuda_fit, cuda_result, false));
+                    tiled_times.push_back(time_fit(tiled_fit, tiled_result, tiled_reference));
+                    cuda_times.push_back(time_fit(cuda_fit, cuda_result, cuda_reference));
                 }
                 if (skip_serial) {
-                    openmp_times.push_back(time_fit(openmp_fit, openmp_result, false));
+                    openmp_times.push_back(time_fit(openmp_fit, openmp_result, reference));
                 } else if (round % 2 == 0) {
-                    serial_times.push_back(time_fit(serial_fit, serial_result, false));
-                    openmp_times.push_back(time_fit(openmp_fit, openmp_result, false));
+                    serial_times.push_back(time_fit(serial_fit, serial_result, reference));
+                    openmp_times.push_back(time_fit(openmp_fit, openmp_result, reference));
                 } else {
-                    openmp_times.push_back(time_fit(openmp_fit, openmp_result, false));
-                    serial_times.push_back(time_fit(serial_fit, serial_result, false));
+                    openmp_times.push_back(time_fit(openmp_fit, openmp_result, reference));
+                    serial_times.push_back(time_fit(serial_fit, serial_result, reference));
                 }
             } else {
                 // Preserve the original control benchmark rotation.
@@ -293,20 +331,20 @@ int main(int argc, char** argv) {
                     if (skip_serial) {
                         if (variant == 0) {
                             openmp_times.push_back(
-                                time_fit(openmp_fit, openmp_result, false));
+                                time_fit(openmp_fit, openmp_result, reference));
                         } else {
                             cuda_times.push_back(
-                                time_fit(cuda_fit, cuda_result, false));
+                                time_fit(cuda_fit, cuda_result, cuda_reference));
                         }
                     } else if (variant == 0) {
                         serial_times.push_back(
-                            time_fit(serial_fit, serial_result, false));
+                            time_fit(serial_fit, serial_result, reference));
                     } else if (variant == 1) {
                         openmp_times.push_back(
-                            time_fit(openmp_fit, openmp_result, false));
+                            time_fit(openmp_fit, openmp_result, reference));
                     } else {
                         cuda_times.push_back(
-                            time_fit(cuda_fit, cuda_result, false));
+                            time_fit(cuda_fit, cuda_result, cuda_reference));
                     }
                 }
             }
@@ -316,16 +354,19 @@ int main(int argc, char** argv) {
         std::vector<kmeans::CudaStageTimings> stage_runs;
         std::vector<kmeans::CudaStageTimings> tiled_stage_runs;
         for (std::size_t i = 0; i < diagnostic_runs; ++i) {
-            const auto diagnostic =
-                kmeans::kmeans_cuda_diagnostic(input, n, d, k, update_cap);
-            if (!same_bits(reference, diagnostic.result)) {
+            const auto diagnostic = compare_count
+                ? kmeans::kmeans_cuda_tiled_diagnostic(input, n, d, k, update_cap)
+                : kmeans::kmeans_cuda_diagnostic(input, n, d, k, update_cap);
+            if (!same_bits(cuda_reference, diagnostic.result)) {
                 throw std::runtime_error("CUDA diagnostic output differs bitwise");
             }
             stage_runs.push_back(diagnostic.timings);
-            if (compare_tiled) {
-                const auto tiled_diagnostic =
-                    kmeans::kmeans_cuda_tiled_diagnostic(
-                        input, n, d, k, update_cap);
+            if (compare_candidate) {
+                const auto tiled_diagnostic = compare_count
+                    ? kmeans::kmeans_cuda_parallel_count_diagnostic(
+                          input, n, d, k, update_cap)
+                    : kmeans::kmeans_cuda_tiled_diagnostic(
+                          input, n, d, k, update_cap);
                 if (!same_frozen_contract(reference, tiled_diagnostic.result,
                                           input, n, d, k) ||
                     !same_bits(tiled_reference, tiled_diagnostic.result)) {
@@ -340,8 +381,13 @@ int main(int argc, char** argv) {
             pair_timings = kmeans::benchmark_cuda_update_pair(
                 input, n, d, k, update_pairs);
         }
+        kmeans::CudaCountPairTimings count_timings;
+        if (count_pairs != 0) {
+            count_timings = kmeans::benchmark_cuda_count_pair(
+                cuda_reference.labels, k, count_pairs);
+        }
         if (input != input_before) throw std::runtime_error("input was modified");
-        const auto& output_result = compare_tiled ? tiled_result : cuda_result;
+        const auto& output_result = compare_candidate ? tiled_result : cuda_result;
         write_binary(argv[5], output_result.labels);
         write_binary(argv[6], output_result.centroids);
         std::cout << "{\"n\":" << n << ",\"d\":" << d << ",\"k\":" << k
@@ -354,6 +400,11 @@ int main(int argc, char** argv) {
                   << ",\"diagnostic_runs\":" << diagnostic_runs
                   << ",\"compare_tiled\":"
                   << (compare_tiled ? "true" : "false")
+                  << ",\"compare_count\":" << (compare_count ? "true" : "false")
+                  << ",\"count_updates_checked\":"
+                  << count_validation.updates_checked
+                  << ",\"count_values_checked\":"
+                  << count_validation.count_values_checked
                   << ",\"serial_timing_skipped\":"
                   << (skip_serial ? "true" : "false")
                   << ",\"serial_times_ms\":";
@@ -382,6 +433,14 @@ int main(int argc, char** argv) {
         print_times(pair_timings.partial_ms);
         std::cout << ",\"finalize_ms\":";
         print_times(pair_timings.finalize_ms);
+        std::cout << "},\"count_pair\":{\"control_ms\":";
+        print_times(count_timings.control_ms);
+        std::cout << ",\"parallel_ms\":";
+        print_times(count_timings.parallel_ms);
+        std::cout << ",\"partial_ms\":";
+        print_times(count_timings.partial_ms);
+        std::cout << ",\"finalize_ms\":";
+        print_times(count_timings.finalize_ms);
         std::cout << "}}\n";
         return 0;
     } catch (const std::exception& error) {

@@ -3,6 +3,7 @@
 #include "kmeans_serial.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace kmeans {
@@ -47,7 +48,7 @@ CudaRun kmeans_cuda_diagnostic(const std::vector<float>& input, std::size_t n,
                                std::size_t d, std::size_t k,
                                std::size_t max_updates = 100);
 
-// Experimental deterministic two-stage FP64 centroid reduction. Assignment
+// Retained deterministic two-stage FP64 centroid reduction. Assignment
 // and integer counting are the unchanged correctness-first kernels.
 Result kmeans_cuda_tiled(const std::vector<float>& input, std::size_t n,
                          std::size_t d, std::size_t k);
@@ -70,5 +71,41 @@ struct CudaUpdatePairTimings {
 CudaUpdatePairTimings benchmark_cuda_update_pair(
     const std::vector<float>& input, std::size_t n, std::size_t d,
     std::size_t k, std::size_t rounds);
+
+// Retained tiled centroid update with a separate two-stage integer count.
+Result kmeans_cuda_parallel_count(const std::vector<float>& input, std::size_t n,
+                                  std::size_t d, std::size_t k);
+Result kmeans_cuda_parallel_count_with_update_cap(
+    const std::vector<float>& input, std::size_t n, std::size_t d,
+    std::size_t k, std::size_t max_updates);
+CudaRun kmeans_cuda_parallel_count_diagnostic(
+    const std::vector<float>& input, std::size_t n, std::size_t d,
+    std::size_t k, std::size_t max_updates = 100);
+
+// Validation only: compare both count kernels on the actual labels used by
+// every Lloyd update. This path is never used for timing.
+struct CudaCountValidation {
+    Result result;
+    std::size_t updates_checked = 0;
+    std::size_t count_values_checked = 0;
+};
+CudaCountValidation kmeans_cuda_parallel_count_checked(
+    const std::vector<float>& input, std::size_t n, std::size_t d,
+    std::size_t k, std::size_t max_updates = 100);
+
+struct CudaCountPairTimings {
+    std::vector<std::int32_t> control_counts;
+    std::vector<std::int32_t> parallel_counts;
+    std::vector<double> control_ms;
+    std::vector<double> parallel_ms;
+    // Separate component runs: their extra midpoint event is excluded from
+    // the primary two-event, two-kernel parallel_ms measurement.
+    std::vector<double> partial_ms;
+    std::vector<double> finalize_ms;
+};
+// Persistent-buffer direct count experiment on fixed labels. rounds=0 only
+// validates exact counts/repeatability; timed experiments require 7..50.
+CudaCountPairTimings benchmark_cuda_count_pair(
+    const std::vector<std::int32_t>& labels, std::size_t k, std::size_t rounds);
 
 }  // namespace kmeans
