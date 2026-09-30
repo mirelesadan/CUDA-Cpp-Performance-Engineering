@@ -58,6 +58,62 @@ void require_equal(const kmeans::Result& actual, const kmeans::Result& expected,
             context + ": convergence flag");
 }
 
+double inertia_for(const std::vector<float>& input, std::size_t d,
+                   std::size_t k, const kmeans::Result& result,
+                   const std::string& context) {
+    double inertia = 0.0;
+    for (std::size_t sample = 0; sample < result.labels.size(); ++sample) {
+        const std::size_t centroid = static_cast<std::size_t>(result.labels[sample]);
+        require(centroid < k, context + ": label range");
+        for (std::size_t feature = 0; feature < d; ++feature) {
+            const double difference =
+                static_cast<double>(input[sample * d + feature]) -
+                static_cast<double>(result.centroids[centroid * d + feature]);
+            inertia += difference * difference;
+        }
+    }
+    return inertia;
+}
+
+void require_frozen_contract(const kmeans::Result& actual,
+                             const kmeans::Result& reference,
+                             const std::vector<float>& input, std::size_t d,
+                             std::size_t k, const std::string& context) {
+    require(actual.labels == reference.labels, context + ": exact labels");
+    require(actual.update_count == reference.update_count,
+            context + ": update count");
+    require(actual.converged == reference.converged,
+            context + ": convergence flag");
+    require(actual.centroids.size() == k * d, context + ": centroid shape");
+    for (std::size_t feature = 0; feature < d; ++feature) {
+        double scale = 1.0;
+        for (std::size_t sample = 0; sample < actual.labels.size(); ++sample) {
+            scale = std::max(scale,
+                std::abs(static_cast<double>(input[sample * d + feature])));
+        }
+        for (std::size_t cluster = 0; cluster < k; ++cluster) {
+            const auto index = cluster * d + feature;
+            require(std::isfinite(actual.centroids[index]),
+                    context + ": nonfinite centroid");
+            const double difference =
+                std::abs(static_cast<double>(actual.centroids[index]) -
+                         static_cast<double>(reference.centroids[index]));
+            require(difference <= 5e-6 * scale,
+                    context + ": centroid tolerance");
+        }
+    }
+    const double reference_inertia =
+        inertia_for(input, d, k, reference, context);
+    const double actual_inertia =
+        inertia_for(input, d, k, actual, context);
+    require(std::abs(actual_inertia - reference_inertia) <=
+                2e-5 * std::max(1.0, std::abs(reference_inertia)),
+            context + ": inertia tolerance");
+    if (reference_inertia == 0.0) {
+        require(actual_inertia == 0.0, context + ": exact zero inertia");
+    }
+}
+
 double validation_inertia(const Fixture& fixture, const kmeans::Result& result) {
     // The validation metric uses double-precision distances; this is separate
     // from the frozen ordered-FP32 arithmetic used to assign labels.
@@ -127,9 +183,18 @@ void test_public_fixtures() {
             fixture.input, n, fixture.d, fixture.k, fixture.update_cap);
         const auto repeat = kmeans::kmeans_cuda_with_update_cap(
             fixture.input, n, fixture.d, fixture.k, fixture.update_cap);
+        auto tiled = kmeans::kmeans_cuda_tiled_with_update_cap(
+            fixture.input, n, fixture.d, fixture.k, fixture.update_cap);
+        const auto tiled_repeat = kmeans::kmeans_cuda_tiled_with_update_cap(
+            fixture.input, n, fixture.d, fixture.k, fixture.update_cap);
         const std::string context = fixture.name;
         require_equal(cuda, serial, context + ": addressed serial parity");
         require_equal(repeat, cuda, context + ": repeatability");
+        require_frozen_contract(tiled, serial, fixture.input, fixture.d,
+                                fixture.k, context + ": tiled");
+        require_equal(tiled_repeat, tiled, context + ": tiled repeatability");
+        require(tiled.labels == fixture.expected_labels,
+                context + ": tiled authoritative labels");
         require(cuda.labels == fixture.expected_labels,
                 context + ": authoritative labels");
         require(cuda.centroids.size() == fixture.expected_centroids.size() &&
@@ -151,13 +216,21 @@ void test_public_fixtures() {
                 context + ": input changed");
         require(cuda.centroids.data() != fixture.input.data(),
                 context + ": output aliases input");
+        require(tiled.centroids.data() != fixture.input.data(),
+                context + ": tiled output aliases input");
+        tiled.labels[0] = -1;
+        tiled.centroids[0] = 99.0f;
+        require_frozen_contract(tiled_repeat, serial, fixture.input,
+                                fixture.d, fixture.k,
+                                context + ": tiled independent output");
         cuda.labels[0] = -1;
         cuda.centroids[0] = 99.0f;
         require_equal(repeat, serial, context + ": independent result ownership");
         compared_labels += n;
     }
     std::cout << "Project 2 CUDA public fixtures passed: six cases, "
-              << compared_labels << " exact labels, zero centroid-bit mismatches\n";
+              << compared_labels << " exact labels; control centroid bits exact, "
+              << "tiled centroids within frozen tolerance and repeatable\n";
 }
 
 void test_feature_and_cluster_edges() {
@@ -175,8 +248,11 @@ void test_feature_and_cluster_edges() {
     }
     const auto odd_serial = kmeans::kmeans_serial_addressed(odd, 16, 3, 2);
     const auto odd_cuda = kmeans::kmeans_cuda(odd, 16, 3, 2);
+    const auto odd_tiled = kmeans::kmeans_cuda_tiled(odd, 16, 3, 2);
     require(odd_serial.labels[7] == 0, "D=3 feature-order discriminator");
     require_equal(odd_cuda, odd_serial, "D=3 odd-feature order");
+    require_frozen_contract(odd_tiled, odd_serial, odd, 3, 2,
+                            "D=3 tiled odd-feature order");
 
     std::vector<float> even;
     for (int sample = 0; sample < 64; ++sample) {
@@ -189,12 +265,43 @@ void test_feature_and_cluster_edges() {
     for (const std::size_t k : {31u, 32u}) {
         const auto serial = kmeans::kmeans_serial_addressed(even, 64, 4, k);
         const auto cuda = kmeans::kmeans_cuda(even, 64, 4, k);
+        const auto tiled = kmeans::kmeans_cuda_tiled(even, 64, 4, k);
         require_equal(cuda, serial, "D=4 K=" + std::to_string(k));
+        require_frozen_contract(tiled, serial, even, 4, k,
+                                "D=4 tiled K=" + std::to_string(k));
     }
     require(std::memcmp(even.data(), before.data(),
                         even.size() * sizeof(float)) == 0,
             "D=4 edge input changed");
     std::cout << "Project 2 CUDA edge cases passed: D=1/3/4, K=2/31/32\n";
+}
+
+void test_tiled_boundaries() {
+    for (const std::size_t n : {4095u, 4096u, 4097u, 8193u}) {
+        const std::size_t d = n == 4097 ? 32u : 3u;
+        const std::size_t k = n == 4097 ? 32u : 2u;
+        std::vector<float> input(n * d);
+        for (std::size_t sample = 0; sample < n; ++sample) {
+            const auto cluster = sample * k / n;
+            for (std::size_t feature = 0; feature < d; ++feature) {
+                input[sample * d + feature] =
+                    static_cast<float>(cluster * 8) +
+                    static_cast<float>(feature) * 0.03125f;
+            }
+        }
+        const auto before = input;
+        const auto reference =
+            kmeans::kmeans_serial_addressed(input, n, d, k);
+        const auto tiled = kmeans::kmeans_cuda_tiled(input, n, d, k);
+        const auto repeat = kmeans::kmeans_cuda_tiled(input, n, d, k);
+        const auto context = "tile boundary N=" + std::to_string(n);
+        require_frozen_contract(tiled, reference, input, d, k, context);
+        require_equal(repeat, tiled, context + ": deterministic repeat");
+        require(std::memcmp(input.data(), before.data(),
+                            input.size() * sizeof(float)) == 0,
+                context + ": input changed");
+    }
+    std::cout << "Project 2 CUDA tiled boundaries passed: N=4095/4096/4097/8193, D=3/32, K=2/32\n";
 }
 
 void test_invalid_inputs() {
@@ -230,6 +337,7 @@ int main() {
         test_invalid_inputs();
         test_public_fixtures();
         test_feature_and_cluster_edges();
+        test_tiled_boundaries();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Project 2 CUDA contract test failed: "

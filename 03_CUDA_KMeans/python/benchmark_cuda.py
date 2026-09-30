@@ -32,7 +32,9 @@ STAGE_FIELDS = (
 
 def invoke(executable: Path, points: np.ndarray, k: int, directory: Path,
            stem: str, *, runs: int = 0, diagnostic_runs: int = 0,
-           update_cap: int = 100, skip_serial: bool = False) -> tuple[KMeansResult, dict]:
+           update_cap: int = 100, skip_serial: bool = False,
+           compare_tiled: bool = False,
+           update_pairs: int = 0) -> tuple[KMeansResult, dict]:
     n, d = points.shape
     if points.dtype != np.float32 or not points.flags.c_contiguous:
         raise AssertionError("native bridge requires C-contiguous float32 input")
@@ -50,12 +52,18 @@ def invoke(executable: Path, points: np.ndarray, k: int, directory: Path,
         command.extend(["--test-update-cap", str(update_cap)])
     if skip_serial:
         command.extend(["--skip-serial", "1"])
+    if compare_tiled:
+        command.extend(["--compare-tiled", "1"])
+    if update_pairs:
+        command.extend(["--update-pairs", str(update_pairs)])
     completed = subprocess.run(command, check=True, capture_output=True, text=True)
     metadata = json.loads(completed.stdout)
     if hashlib.sha256(input_path.read_bytes()).digest() != before:
         raise AssertionError("native bridge modified input")
     if metadata["timed_runs_each"] != runs or metadata["diagnostic_runs"] != diagnostic_runs:
         raise AssertionError("native bridge timing protocol mismatch")
+    if metadata["compare_tiled"] != compare_tiled:
+        raise AssertionError("native bridge reduction variant mismatch")
     labels = np.fromfile(labels_path, dtype=np.int32)
     centroids = np.fromfile(centroids_path, dtype=np.float32)
     if labels.size != n or centroids.size != k * d:
@@ -66,19 +74,21 @@ def invoke(executable: Path, points: np.ndarray, k: int, directory: Path,
 
 
 def verify(points: np.ndarray, oracle: KMeansResult,
-           candidate: KMeansResult) -> None:
+           candidate: KMeansResult, *, compare_tiled: bool = False):
     comparison = compare_results(points, oracle, candidate)
-    # CPU native results have previously matched all centroid bits. Keep
-    # that stronger baseline for this correctness-first CUDA milestone.
-    np.testing.assert_array_equal(candidate.centroids.view(np.uint32),
-                                  oracle.centroids.view(np.uint32))
-    if comparison.max_centroid_absolute_error != 0.0 or \
-            comparison.max_centroid_scaled_error != 0.0 or \
-            comparison.candidate_inertia != comparison.reference_inertia:
-        raise AssertionError("exact centroid or inertia agreement was lost")
+    if not compare_tiled:
+        # Preserve the stronger correctness-first CUDA control gate.
+        np.testing.assert_array_equal(candidate.centroids.view(np.uint32),
+                                      oracle.centroids.view(np.uint32))
+        if comparison.max_centroid_absolute_error != 0.0 or \
+                comparison.max_centroid_scaled_error != 0.0 or \
+                comparison.candidate_inertia != comparison.reference_inertia:
+            raise AssertionError("exact centroid or inertia agreement was lost")
+    return comparison
 
 
-def run_fixtures(executable: Path, directory: Path) -> None:
+def run_fixtures(executable: Path, directory: Path,
+                 compare_tiled: bool) -> None:
     labels_checked = 0
     for case in public_cases():
         points = np.array(case["points"], dtype=np.float32, order="C")
@@ -87,26 +97,41 @@ def run_fixtures(executable: Path, directory: Path) -> None:
         oracle = (fit_kmeans(points, case["k"]) if cap == 100 else
                   _fit_with_update_cap(points, case["k"], cap))
         candidate, metadata = invoke(executable, points, case["k"], directory,
-                                     case["name"], update_cap=cap)
+                                     case["name"], update_cap=cap,
+                                     compare_tiled=compare_tiled)
         again, _ = invoke(executable, points, case["k"], directory,
-                          case["name"] + ".repeat", update_cap=cap)
-        verify(points, oracle, candidate)
-        verify(points, oracle, again)
+                          case["name"] + ".repeat", update_cap=cap,
+                          compare_tiled=compare_tiled)
+        comparison = verify(points, oracle, candidate,
+                            compare_tiled=compare_tiled)
+        verify(points, oracle, again, compare_tiled=compare_tiled)
+        np.testing.assert_array_equal(candidate.labels, again.labels)
+        np.testing.assert_array_equal(candidate.centroids.view(np.uint32),
+                                      again.centroids.view(np.uint32))
         np.testing.assert_array_equal(candidate.labels, case["expected_labels"])
         expected_centroids = np.asarray(case["expected_centroids"], dtype=np.float32)
-        np.testing.assert_array_equal(candidate.centroids.view(np.uint32),
-                                      expected_centroids.view(np.uint32))
+        if not compare_tiled:
+            np.testing.assert_array_equal(candidate.centroids.view(np.uint32),
+                                          expected_centroids.view(np.uint32))
         np.testing.assert_array_equal(points.view(np.uint32), before)
         if candidate.update_count != case["expected_update_count"] or \
                 candidate.converged is not case["expected_converged"]:
             raise AssertionError(f"{case['name']}: update/convergence changed")
         if metadata["cuda_warmups"] != 1:
             raise AssertionError("fixture CUDA path was not launched")
+        if case["expected_inertia"] == 0.0 and comparison.candidate_inertia != 0.0:
+            raise AssertionError(f"{case['name']}: exact zero inertia lost")
         labels_checked += len(points)
-        print(f"{case['name']}: {len(points)} labels, centroid bits, "
-              "update/convergence, and inertia exact; repeat exact")
+        bit_mismatches = int(np.count_nonzero(
+            candidate.centroids.view(np.uint32) != oracle.centroids.view(np.uint32)))
+        print(f"{case['name']}: {len(points)} exact labels; "
+              f"centroid max abs/scaled error "
+              f"{comparison.max_centroid_absolute_error:.9g}/"
+              f"{comparison.max_centroid_scaled_error:.9g}; "
+              f"inertia error {abs(comparison.candidate_inertia-comparison.reference_inertia):.9g}; "
+              f"{bit_mismatches} centroid-bit differences; repeat exact")
     print(f"public fixtures: {len(public_cases())} cases, "
-          f"{labels_checked} labels, zero centroid-bit mismatches")
+          f"{labels_checked} exact labels; frozen contract passed")
 
 
 def edge_cases() -> list[tuple[str, np.ndarray, int]]:
@@ -133,16 +158,39 @@ def edge_cases() -> list[tuple[str, np.ndarray, int]]:
     ]
 
 
-def run_edges(executable: Path, directory: Path) -> None:
-    for name, points, k in edge_cases():
+def run_edges(executable: Path, directory: Path, compare_tiled: bool) -> None:
+    cases = edge_cases()
+    if compare_tiled:
+        for n in (4095, 4096, 4097, 8193):
+            d, k = (32, 32) if n == 4097 else (3, 2)
+            points = np.empty((n, d), dtype=np.float32)
+            for sample in range(n):
+                points[sample] = (sample * k // n) * 8 + \
+                    np.arange(d, dtype=np.float32) * np.float32(0.03125)
+            cases.append((f"edge_tiled_n{n}", points, k))
+    for name, points, k in cases:
         before = points.view(np.uint32).copy()
         oracle = fit_kmeans(points, k)
-        candidate, _ = invoke(executable, points, k, directory, name)
-        verify(points, oracle, candidate)
+        candidate, _ = invoke(executable, points, k, directory, name,
+                              compare_tiled=compare_tiled)
+        comparison = verify(points, oracle, candidate,
+                            compare_tiled=compare_tiled)
+        if compare_tiled:
+            again, _ = invoke(executable, points, k, directory,
+                              name + ".repeat", compare_tiled=True)
+            verify(points, oracle, again, compare_tiled=True)
+            np.testing.assert_array_equal(candidate.centroids.view(np.uint32),
+                                          again.centroids.view(np.uint32))
+            np.testing.assert_array_equal(candidate.labels, again.labels)
+            if (candidate.update_count != again.update_count or
+                    candidate.converged != again.converged):
+                raise AssertionError(f"{name}: tiled repeat termination changed")
         np.testing.assert_array_equal(points.view(np.uint32), before)
         print(f"{name}: (N,D,K)=({len(points)},{points.shape[1]},{k}), "
               f"updates={candidate.update_count}, converged={candidate.converged}; "
-              "labels/centroid bits/inertia exact")
+              f"max centroid abs/scaled error "
+              f"{comparison.max_centroid_absolute_error:.9g}/"
+              f"{comparison.max_centroid_scaled_error:.9g}")
 
 
 def print_timings(name: str, metadata: dict) -> None:
@@ -156,6 +204,7 @@ def print_timings(name: str, metadata: dict) -> None:
         ("addressed serial", "serial_times_ms"),
         ("OpenMP-8", "openmp8_times_ms"),
         ("CUDA native wall", "cuda_wall_times_ms"),
+        ("tiled CUDA native wall", "tiled_wall_times_ms"),
     ):
         values = metadata[key]
         if not values:
@@ -171,6 +220,9 @@ def print_timings(name: str, metadata: dict) -> None:
             if label in medians:
                 print(f"{label} / CUDA native-wall speedup: "
                       f"{medians[label] / medians['CUDA native wall']:.6f}x")
+        if "tiled CUDA native wall" in medians:
+            print(f"CUDA control / tiled whole-fit speedup: "
+                  f"{medians['CUDA native wall'] / medians['tiled CUDA native wall']:.6f}x")
 
     stages = metadata["cuda_stage_runs"]
     if len(stages) != metadata["diagnostic_runs"]:
@@ -187,10 +239,38 @@ def print_timings(name: str, metadata: dict) -> None:
                           for key, value in stage_medians.items()))
         print("Diagnostic device/one-shot timings are directional and are not "
               "the normal-fit native-wall speedup denominator.")
+    if metadata["compare_tiled"]:
+        tiled_stages = metadata["tiled_stage_runs"]
+        if len(tiled_stages) != metadata["diagnostic_runs"]:
+            raise AssertionError("missing tiled stage diagnostics")
+        if tiled_stages:
+            if any(set(stage) != set(STAGE_FIELDS) for stage in tiled_stages):
+                raise AssertionError("tiled CUDA stage field set changed")
+            print("Tiled CUDA diagnostic stage runs (separate fits):")
+            print(json.dumps(tiled_stages, separators=(",", ":")))
+            print("Tiled cumulative update median (ms): "
+                  f"{statistics.median(s['centroid_update_ms'] for s in tiled_stages):.6f}")
+        pair = metadata["update_pair"]
+        if pair["control_ms"]:
+            pair_length = len(pair["control_ms"])
+            if any(len(pair[key]) != pair_length for key in
+                   ("tiled_ms", "partial_ms", "finalize_ms")):
+                raise AssertionError("incomplete direct update pairs")
+            for label, key in (("control", "control_ms"), ("tiled", "tiled_ms"),
+                               ("partials", "partial_ms"), ("finalize", "finalize_ms")):
+                values = pair[key]
+                print(f"direct update {label}: raw "
+                      f"{[round(value, 6) for value in values]}; "
+                      f"min/median/max {min(values):.6f}/"
+                      f"{statistics.median(values):.6f}/{max(values):.6f} ms")
+            control = statistics.median(pair["control_ms"])
+            tiled = statistics.median(pair["tiled_ms"])
+            print(f"direct update speedup {control/tiled:.6f}x; "
+                  f"runtime reduction {(1-tiled/control)*100:.4f}%")
 
 
 def run_workload(executable: Path, directory: Path, mode: str,
-                 diagnostic_runs: int) -> None:
+                 diagnostic_runs: int, compare_tiled: bool) -> None:
     generated = (generate_iterative_workload() if mode == "iterative" else
                  generate_workload(WORKLOADS["profiling" if mode == "primary"
                                              else "gpu"]))
@@ -202,14 +282,21 @@ def run_workload(executable: Path, directory: Path, mode: str,
     oracle = fit_kmeans(points, spec.k)
     candidate, metadata = invoke(
         executable, points, spec.k, directory, mode, runs=runs,
-        diagnostic_runs=diagnostic_runs)
-    verify(points, oracle, candidate)
+        diagnostic_runs=diagnostic_runs, compare_tiled=compare_tiled,
+        update_pairs=7 if compare_tiled and mode == "gpu" else 0)
+    comparison = verify(points, oracle, candidate,
+                        compare_tiled=compare_tiled)
     np.testing.assert_array_equal(points.view(np.uint32), before)
     if candidate.update_count != expected_updates or not candidate.converged:
         raise AssertionError(f"{mode}: iteration state changed")
     print(f"{mode}: (N,D,K)=({spec.n},{spec.d},{spec.k}), seed={spec.seed}; "
           f"updates={candidate.update_count}, converged={candidate.converged}; "
-          "native CPU/OpenMP/CUDA and NumPy labels/centroid bits exact")
+          f"labels exact; centroid max abs/scaled error "
+          f"{comparison.max_centroid_absolute_error:.9g}/"
+          f"{comparison.max_centroid_scaled_error:.9g}; "
+          f"inertia error {abs(comparison.candidate_inertia-comparison.reference_inertia):.9g}; "
+          f"centroid-bit differences "
+          f"{np.count_nonzero(candidate.centroids.view(np.uint32) != oracle.centroids.view(np.uint32))}")
     print_timings(mode, metadata)
 
 
@@ -221,6 +308,8 @@ def main() -> None:
                                          "gpu", "iterative", "all"))
     parser.add_argument("--diagnostic-runs", type=int, default=3,
                         help="separate CUDA stage-timing fits per workload")
+    parser.add_argument("--compare-tiled", action="store_true",
+                        help="validate and benchmark the tiled CUDA candidate")
     args = parser.parse_args()
     executable = args.executable.resolve()
     if not executable.is_file():
@@ -233,11 +322,12 @@ def main() -> None:
         directory = Path(temporary)
         for mode in modes:
             if mode == "fixtures":
-                run_fixtures(executable, directory)
+                run_fixtures(executable, directory, args.compare_tiled)
             elif mode == "edges":
-                run_edges(executable, directory)
+                run_edges(executable, directory, args.compare_tiled)
             else:
-                run_workload(executable, directory, mode, args.diagnostic_runs)
+                run_workload(executable, directory, mode,
+                             args.diagnostic_runs, args.compare_tiled)
 
 
 if __name__ == "__main__":

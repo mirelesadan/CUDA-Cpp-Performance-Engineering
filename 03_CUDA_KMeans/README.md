@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, correctness-first CUDA baseline, and focused count/update profiling are complete. An isolated deterministic centroid-reduction experiment is next.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, and deterministic tiled FP64 centroid reduction are complete. Parallel integer counting is the next isolated CUDA experiment.
 
 ## Why this project exists
 
@@ -216,9 +216,21 @@ On this all-nonempty GPU workload, count logically inspects `N·K = 4,194,304` l
 
 Ranked designs: (1) **deterministic two-stage centroid reduction**—parallel fixed sample tiles produce FP64 partial sums, followed by a fixed-order final reduction using the unchanged count kernel; highest expected gain from many blocks and a shorter sum chain, moderate complexity and rounding-order risk. (2) **parallel integer count reduction**, leaving ordered centroid sums untouched; low numerical risk and moderate complexity but addresses only the smaller count stage. (3) **atomic FP64 sum/count accumulation**; ample parallelism but contention, nondeterministic FP64 order, and the highest reproducibility risk. The selected next *single* experiment is design 1, with the current count kernel and assignment unchanged. No kernel optimization was made during this checkpoint.
 
+### Isolated CUDA experiment — deterministic tiled FP64 centroid reduction
+
+The retained control still assigns one worker to each `(cluster,feature)` and scans all `N` labels in sample order. The separate candidate changes only centroid update. Stage A uses fixed 4,096-sample tiles; one 256-thread block owns each `(cluster,feature,tile)`, each thread accumulates its assigned samples in ascending order in FP64, and a fixed shared-memory binary tree writes one FP64 partial. Stage B adds that pair's partials in ascending tile order, divides by the **unchanged** integer count in FP64, and rounds once to FP32. Empty clusters retain previous centroid bits. Assignment, count, layout, and convergence remain unchanged. On `(262,144,16,16)`, Stage A is a `(64,256)` grid (16,384 blocks) and Stage B one 256-thread block. Workspace is `8 × ceil(N/4096) × K × D` bytes: 16,384 partials / 128 KiB on this workload, at most 2 MiB within the frozen dimension limits; Stage A also uses 2 KiB shared memory/block.
+
+The candidate is deterministic but reorganizes FP64 additions; baseline centroid-bit equality is **not** an acceptance rule. The frozen rule remains exact labels, update count and convergence; every centroid coordinate within `5e-6 × max(1,max_i |X[i,j]|)`; validation inertia within `2e-5 × max(1,|I_ref|)`, including the exact-zero fixture. Six public fixtures (96 exact labels), D=1/3/4/32, K=2/31/32, signed-zero/subnormal cases, and N=4095/4096/4097/8193 tile boundaries passed; repeated candidate results were bitwise identical and input unchanged. The primary, GPU, and 22-update iterative workloads matched the authoritative NumPy reference on labels/termination and had zero measured centroid absolute/scaled error, zero inertia error, and zero centroid-bit differences **in these tested cases**. The old baseline's stricter exact-bit tests remain intact; both variants pass all three Release CTest targets.
+
+For the GPU workload, persistent device buffers, copied input, and frozen first-assignment labels/counts preceded direct timing. Two warm-ups per variant preceded seven AB/BA-interleaved CUDA-event pairs; control timing enclosed only the original update kernel, candidate timing enclosed both tiled kernels without an intermediate host sync. Raw direct-update times (ms): control `33.521664, 33.510208, 33.512222, 33.510399, 33.512447, 33.533695, 33.516544` (min/median/max `33.510208/33.512447/33.533695`); tiled `1.205248, 1.186816, 1.202176, 1.185792, 1.204224, 1.184768, 1.202048` (`1.184768/1.202048/1.205248`). The paired median speedup is `27.879×`, a `96.41%` reduction; Stage-A/Stage-B medians were `1.189760/0.012288` ms. Historical 45.951 ms event timing and profiler replay durations are not speedup denominators.
+
+Normal whole-fit Release `steady_clock` comparisons included allocations, validation, H2D, computation, D2H, and teardown, with three warm-ups per CUDA variant. GPU control/candidate fits ran adjacently in alternating AB/BA order; CPU controls ran in the same AC-powered session, and output checks were outside the timer. Fresh control/tiled/OpenMP-8 medians (ms) were primary `7.6621/3.2920/2.9560` (7 runs; CUDA `2.327×`), GPU `45.5468/12.9150/19.1134` (7 runs; `3.527×`), and iterative `32.8411/6.9164/4.8964` (5 runs; `4.748×`). The GPU tiled fit beats fresh OpenMP-8 by `1.480×`; the other two sizes do not. Separate event-instrumented fits put 22-update cumulative tiled centroid work at `0.760640` ms versus `26.269760` ms for the control; these diagnostic medians are not whole-fit speedup denominators. Cross-session GPU-clock and transfer/initialization variability remain, so claims use fresh paired medians, not best runs.
+
+A focused Nsight Compute 2025.2.1 check on a warmed normal Stage-A launch found 39 registers/thread, 2 KiB static shared memory/block, zero local load/store sectors, 98.71% occupancy (47.38 active warps/SM), 86.88% device-wide SM throughput, 6.50% DRAM throughput, and 91.06% cycles with no eligible scheduler warp; L1TEX-queue throttle dominated at about 62.2% of cycles per issued instruction. Stage B had 36 registers/thread and one block, so still underfills the GPU, but its direct-event median was only ~1% of candidate update time. The grid-wide occupancy/SM-throughput change and shorter per-thread sum chains support the speedup; no logical `N·K·D` label scans were eliminated, and the relative contribution of those two improvements was not isolated. The candidate is retained. The now-unchanged count kernel costs about 3.02 ms on the GPU and 4.62 ms cumulatively over 22 iterative updates, exceeding the new centroid-update cost; isolated parallel integer counting is next.
+
 ## Planned workflow
 
-Next: test the isolated deterministic two-stage centroid reduction against the retained CUDA baseline and frozen contract. Python integration, broader size scaling, and library comparisons follow native CUDA architecture evaluation.
+Next: test isolated parallel integer counting against the unchanged count kernel and retained tiled centroid update. Python integration, broader size scaling, and library comparisons follow native CUDA architecture evaluation.
 
 ## Primary learning goals
 
@@ -256,10 +268,10 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, and focused count/update Nsight profiling are complete. The two-feature distance-pipeline experiment was rejected; deterministic centroid reduction is next. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, and deterministic tiled centroid reduction are complete. The two-feature distance-pipeline experiment was rejected; isolated parallel integer counting is next. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
 - **TBD:** Explain the historical-versus-fresh baseline timing difference; broader independent size/stage scaling remains future work.
-- **TBD:** Validate and benchmark the selected centroid reduction; later CUDA layout and fusion decisions remain open.
+- **TBD:** Validate and benchmark a parallel integer count separately; later CUDA layout and fusion decisions remain open.
 - **TBD:** Availability and fair configuration of external libraries; binding approach.

@@ -47,4 +47,28 @@ CudaRun kmeans_cuda_diagnostic(const std::vector<float>& input, std::size_t n,
                                std::size_t d, std::size_t k,
                                std::size_t max_updates = 100);
 
+// Experimental deterministic two-stage FP64 centroid reduction. Assignment
+// and integer counting are the unchanged correctness-first kernels.
+Result kmeans_cuda_tiled(const std::vector<float>& input, std::size_t n,
+                         std::size_t d, std::size_t k);
+Result kmeans_cuda_tiled_with_update_cap(const std::vector<float>& input,
+                                         std::size_t n, std::size_t d,
+                                         std::size_t k, std::size_t max_updates);
+CudaRun kmeans_cuda_tiled_diagnostic(const std::vector<float>& input,
+                                     std::size_t n, std::size_t d, std::size_t k,
+                                     std::size_t max_updates = 100);
+
+// Experiment-only direct update timing. Frozen first-assignment labels/counts,
+// persistent device buffers/events, paired normal kernel launches; timings
+// exclude allocation, copies, initialization, assignment, and counting.
+struct CudaUpdatePairTimings {
+    std::vector<double> control_ms;
+    std::vector<double> tiled_ms;
+    std::vector<double> partial_ms;
+    std::vector<double> finalize_ms;
+};
+CudaUpdatePairTimings benchmark_cuda_update_pair(
+    const std::vector<float>& input, std::size_t n, std::size_t d,
+    std::size_t k, std::size_t rounds);
+
 }  // namespace kmeans
