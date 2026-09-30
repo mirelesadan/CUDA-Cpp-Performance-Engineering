@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, and assignment-only OpenMP scaling are complete; CUDA is next.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, and correctness-first CUDA baseline are complete. Focused count/update profiling is next.
 
 ## Why this project exists
 
@@ -163,9 +163,41 @@ Assignment still consumes about 69–78% of phase-timed fits at higher thread co
 
 Reproduce with `cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build -DPROJECT2_ENABLE_OPENMP=ON` (add the appropriate platform generator/Release selection), then build Release and run CTest plus `python -B 03_CUDA_KMeans/python/benchmark_openmp.py PATH_TO_SCALING_EXE fixtures`, `profiling`, or `iterative_profile`. The driver defaults to this machine's 1/2/4/8/16/20 counts and accepts `--counts` for other hosts. A separate ignored build with `-DPROJECT2_ENABLE_PHASE_TIMING=ON` supplies the optional `--phase-executable` comparison. Generated workloads, binaries, and timing logs are not committed.
 
+## Correctness-first CUDA baseline
+
+The opt-in `kmeans_cuda` path keeps the input, centroids, two label arrays, integer counts, and change flag resident on the GPU throughout each fit. A seed-copy kernel uses the frozen integer row formula. Assignment launches one thread per sample in 256-thread blocks, visits clusters and features in ascending order, and uses explicit round-to-nearest `__fsub_rn`, `__fmul_rn`, and `__fadd_rn` with strict `<` tie handling. CUDA fast math is not enabled; the build also disables FMA contraction. Each count worker scans all labels in sample order; each `(cluster,feature)` update worker scans the same ordered labels and accumulates matching FP32 inputs in FP64 with `__dadd_rn`, divides with `__ddiv_rn`, and converts once with `__double2float_rn`. Empty clusters retain their prior bits. This deliberately redundant update is a correctness-first control, not a reduction optimization.
+
+An integer change flag is copied to the host once per update pass; complete labels and centroids return only after convergence or the update cap. Swapping current/next label buffers returns the final reassignment without an extra update, including the reduced-cap nonconvergence case. The regular `Result` API has no profiling events; a separate diagnostic API records stage times.
+
+The public six-case fixture passed against the frozen NumPy result: 96/96 labels, zero centroid-bit mismatches, exact update counts and flags, and matching independently recomputed inertia. The FP32 rounding, duplicate-seed/empty-cluster, and reduced-cap cases passed. D=1, D=3 ordered arithmetic, D=4, K=2/32, signed-zero, and subnormal edge checks also matched centroid bits. On the primary `(65,536,8,16)`, GPU `(262,144,16,16)`, and 22-update `(16,384,8,8)` workloads, CUDA, addressed serial, OpenMP-8, and NumPy agreed on all labels, centroid bits, counts, and flags; input was unchanged. Serial, OpenMP, and CUDA native contract tests passed, as did a separate default CPU-only Release build/test. Windows/MSVC is verified; Linux is not.
+
+On the AC-powered RTX 4070 Laptop GPU, CUDA 12.9, sm_89, and MSVC Release `/O2`, input generation and raw-file I/O occurred before timing. Each normal whole-fit `steady_clock` call includes validation, allocations, H2D, all device work, D2H, and teardown; it excludes output comparison and serialization. The fresh addressed-serial and OpenMP-8 controls each had one warm-up; CUDA had three. Call order rotated across seven primary/GPU rounds and five iterative rounds. Raw whole-fit times are milliseconds; parentheses give medians:
+
+| Workload | Addressed serial raw (median) | OpenMP-8 raw (median) | CUDA native-wall raw (median) |
+| --- | --- | --- | --- |
+| Primary | 10.504, 14.589, 11.564, 10.273, 10.407, 10.873, 11.802 (10.873) | 2.904, 4.313, 2.474, 2.484, 2.487, 2.896, 2.726 (2.726) | 7.837, 7.971, 8.103, 7.721, 7.621, 7.859, 7.933 (7.859) |
+| GPU | 58.461, 66.186, 58.544, 80.273, 63.984, 58.795, 66.131 (63.984) | 17.797, 19.031, 18.697, 18.047, 19.216, 19.871, 18.211 (18.697) | 50.375, 50.216, 50.845, 54.638, 50.461, 49.037, 60.156 (50.461) |
+| Iterative | 16.914, 20.368, 19.272, 21.934, 18.242 (19.272) | 4.667, 6.205, 4.430, 5.172, 5.709 (5.172) | 38.090, 36.240, 36.158, 36.986, 48.044 (36.986) |
+
+Fresh serial/OpenMP-8 speedups versus CUDA native wall were `1.384×/0.347×` primary, `1.268×/0.371×` GPU, and `0.521×/0.140×` iterative; ratios below one mean CUDA is slower. Absolute laptop CPU time has varied across sessions, so only these same-session ratios are used. This deliberately unoptimized CUDA baseline is not yet competitive with OpenMP-8 on these workloads.
+
+Three separate event-instrumented fits per workload provide directional cumulative stage medians (ms), not the normal-call speedup denominator:
+
+| Workload | Setup* | H2D | Seed init | First assign | Count | Centroid update | Reassign | Flag reset/D2H | Final D2H | Device algorithm | One-shot GPU path |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Primary | 0.545 | 0.374 | 0.124 | 0.045 | 0.798 | 4.899 | 0.070 | 0.092 | 0.083 | 6.049 | 6.546 |
+| GPU | 0.227 | 2.809 | 0.035 | 0.455 | 3.021 | 45.951 | 0.475 | 0.091 | 0.275 | 49.947 | 53.324 |
+| Iterative | 0.163 | 0.113 | 0.107 | 0.012 | 4.688 | 29.703 | 0.390 | 1.249 | 0.048 | 35.321 | 36.385 |
+
+*Setup is host-clock allocation/event creation; component timings are CUDA-event measurements, and device-algorithm/one-shot totals are sums of those components. Device algorithm excludes the tiny convergence-flag D2H; one-shot GPU includes it and H2D/final D2H, but excludes setup and host validation/teardown. Individually computed medians need not sum. The first primary diagnostic setup call was a 196.786 ms outlier, and one initialization event was 1.432 ms; diagnostic runs are not a stable allocation benchmark. Centroid update alone occupied approximately 81%, 92%, and 84% of device-algorithm medians; count plus update occupied approximately 94%, 98%, and 97%. Transfer cost is secondary here. The 22-update cumulative count/update/flag results reveal the iterative reduction cost directly; no CUDA kernel optimization was made.
+
+Reproduce with `cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build/cuda -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPROJECT2_ENABLE_CUDA=ON -DPROJECT2_ENABLE_OPENMP=ON -DPROJECT2_CUDA_ARCHITECTURES=89`, then build Release, run CTest, and run `python -B 03_CUDA_KMeans/python/benchmark_cuda.py PATH_TO_EXE all` in the existing Python environment. CUDA and OpenMP are off by default; CUDA can build without OpenMP, while the combined benchmark target requires both. The driver creates temporary raw arrays only; no benchmark data or generated binaries are committed.
+
+The ranked CUDA opportunities are (1) replace redundant ordered full-dataset scans with a carefully validated parallel centroid reduction, the dominant but highest numerical-risk change; (2) parallelize or restructure integer cluster counting, a smaller repeated scan; (3) reduce per-pass convergence/launch overhead, relevant mainly after the first two. Focused Nsight Compute profiling of the current count/update kernels is the next experiment before choosing a reduction architecture. Assignment caching, transfers, and fusion are not first priorities on this baseline evidence.
+
 ## Planned workflow
 
-Next: implement a correctness-first CUDA K-means baseline. Python integration and library comparisons come after the native behavior is trustworthy.
+Next: profile the measured CUDA count/update bottleneck. Python integration, broader size scaling, and library comparisons follow only after the native CUDA architecture has been evaluated.
 
 ## Primary learning goals
 
@@ -203,7 +235,7 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, and assignment-only portable OpenMP scaling are complete. The two-feature distance-pipeline experiment was rejected; correctness-first CUDA is next. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, and the exact correctness-first CUDA baseline are complete. The two-feature distance-pipeline experiment was rejected; focused CUDA count/update profiling is next. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 

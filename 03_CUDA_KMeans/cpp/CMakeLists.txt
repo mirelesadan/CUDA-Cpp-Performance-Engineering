@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(project2_kmeans_serial LANGUAGES CXX)
 
-# Standalone CPU-only build; Project 1's OpenMP/CUDA/Python options do not apply.
+# Standalone CPU-only build by default. OpenMP and CUDA are separately opt-in.
 add_library(project2_kmeans_serial STATIC src/kmeans_serial.cpp)
 target_include_directories(project2_kmeans_serial PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(project2_kmeans_serial PUBLIC cxx_std_17)
@@ -29,6 +29,9 @@ add_test(NAME phase2_kmeans_serial_contract_tests
 option(PROJECT2_ENABLE_PHASE_TIMING "Build separate coarse phase-timing target" OFF)
 option(PROJECT2_ENABLE_PROFILING_SYMBOLS "Emit Release source symbols for sampling" OFF)
 option(PROJECT2_ENABLE_OPENMP "Build the assignment-only OpenMP implementation" OFF)
+option(PROJECT2_ENABLE_CUDA "Build the correctness-first CUDA K-means baseline" OFF)
+set(PROJECT2_CUDA_ARCHITECTURES "89" CACHE STRING
+    "CUDA architectures for Project 2 (for example, 89 for Ada)")
 
 if(PROJECT2_ENABLE_PHASE_TIMING)
     add_library(project2_kmeans_phase_timing STATIC src/kmeans_serial.cpp)
@@ -92,6 +95,44 @@ if(PROJECT2_ENABLE_OPENMP)
             src/openmp_scaling.cpp)
         target_link_libraries(phase2_kmeans_openmp_scaling_phase_timing PRIVATE
             project2_kmeans_openmp_phase_timing)
+    endif()
+endif()
+
+if(PROJECT2_ENABLE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+
+    add_library(project2_kmeans_cuda STATIC src/kmeans_cuda.cu)
+    target_include_directories(project2_kmeans_cuda PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(project2_kmeans_cuda PUBLIC
+        project2_kmeans_serial CUDA::cudart)
+    set_target_properties(project2_kmeans_cuda PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED YES
+        CUDA_EXTENSIONS OFF
+        CUDA_ARCHITECTURES "${PROJECT2_CUDA_ARCHITECTURES}")
+    # The CUDA baseline explicitly uses round-to-nearest FP32 operations.
+    # Keep CUDA fast math/FMA contraction disabled as an additional safeguard.
+    target_compile_options(project2_kmeans_cuda PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
+
+    add_executable(phase2_kmeans_cuda_contract_tests src/cuda_contract_tests.cpp)
+    target_link_libraries(phase2_kmeans_cuda_contract_tests PRIVATE
+        project2_kmeans_cuda)
+    target_compile_features(phase2_kmeans_cuda_contract_tests PRIVATE cxx_std_17)
+    set_target_properties(phase2_kmeans_cuda_contract_tests PROPERTIES
+        CXX_EXTENSIONS OFF)
+    add_test(NAME phase2_kmeans_cuda_contract_tests
+             COMMAND phase2_kmeans_cuda_contract_tests)
+
+    if(PROJECT2_ENABLE_OPENMP)
+        add_executable(phase2_kmeans_cuda_benchmark src/cuda_benchmark.cpp)
+        target_link_libraries(phase2_kmeans_cuda_benchmark PRIVATE
+            project2_kmeans_cuda project2_kmeans_openmp)
+        target_compile_features(phase2_kmeans_cuda_benchmark PRIVATE cxx_std_17)
+        set_target_properties(phase2_kmeans_cuda_benchmark PROPERTIES
+            CXX_EXTENSIONS OFF)
     endif()
 endif()
 
