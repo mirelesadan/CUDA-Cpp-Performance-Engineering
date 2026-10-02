@@ -792,6 +792,8 @@ CudaUpdatePairTimings benchmark_cuda_update_pair(
     return output;
 }
 
+#include "kmeans_cuda_owner.cuh"
+
 #ifdef KMEANS_LIFECYCLE_BENCHMARK
 #include "kmeans_cuda_lifecycle.cuh"
 #endif

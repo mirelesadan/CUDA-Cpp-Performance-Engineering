@@ -4,9 +4,47 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace kmeans {
+
+struct FitMetadata {
+    std::size_t update_count = 0;
+    bool converged = false;
+};
+
+// Supported fixed-shape, synchronous CUDA owner; uses the retained parallel
+// count + tiled centroid pipeline. No host input is retained or read by fit().
+// upload/fit/download require the construction device to be current. Not thread-safe.
+// Do not reset its CUDA context while it is alive. Copy/move are disabled.
+class CudaKMeansBuffer {
+public:
+    CudaKMeansBuffer(std::size_t n, std::size_t d, std::size_t k);
+    ~CudaKMeansBuffer() noexcept;
+    CudaKMeansBuffer(const CudaKMeansBuffer&) = delete;
+    CudaKMeansBuffer& operator=(const CudaKMeansBuffer&) = delete;
+    CudaKMeansBuffer(CudaKMeansBuffer&&) = delete;
+    CudaKMeansBuffer& operator=(CudaKMeansBuffer&&) = delete;
+
+    // Full finite/bounded input validation, then H2D. Invalid arguments leave
+    // the previous state intact. Successful upload invalidates prior output.
+    void upload(const std::vector<float>& input);
+    // Independent frozen 100-update fit, reseeded from the uploaded snapshot.
+    // Returns only metadata; final labels/centroids remain on the device.
+    FitMetadata fit();
+    // Validation-only counterpart for the frozen nonconvergence fixture.
+    FitMetadata fit_with_update_cap(std::size_t max_updates);
+    // Fresh independent host vectors; does not consume the resident output.
+    Result download();
+    std::size_t device_bytes() const noexcept;
+
+    // CUDA-operation failures invalidate the owner; reconstruct it to recover.
+    // Invalid lifecycle calls throw logic_error without changing its state.
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // GPU-stage fields are cumulative CUDA-event milliseconds; setup_ms and
 // native_wall_ms are host steady-clock measurements. Device algorithm

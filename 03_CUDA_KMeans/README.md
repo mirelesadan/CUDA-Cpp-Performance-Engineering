@@ -387,13 +387,100 @@ For GPU, 20-fit wall cost approaches ~3.06 ms/fit, with an uninstrumented fit-me
 
 Requested bytes scale as `4ND + 4KD + 8N + 4K + 4 + 8KD*ceil(N/4096) + 4K*ceil(N/1024)`. This excludes CUDA context/allocator bookkeeping, diagnostic events, host output vectors, and on-chip shared memory. No pinned staging, asynchronous copies, new streams, Python binding, or convergence redesign was introduced.
 
-**Decision:** rank (1) production-quality explicit persistent native ownership with validation at upload, (2) iterative convergence/launch-overhead investigation, (3) centroid Stage-A kernel tuning. The **single next step** is a correctness-first supported native resident owner with explicit validated upload / independent fit / download semantics; Python exposure follows later. Do not simply remove checks from the normal API. Pinned transfers are lower priority than avoiding repeated host validation/upload, and no further kernel tuning was performed here.
+**Decision at this checkpoint:** rank (1) production-quality explicit persistent native ownership with validation at upload, (2) iterative convergence/launch-overhead investigation, (3) centroid Stage-A kernel tuning. The selected supported-owner milestone is completed below; Python exposure follows it. Do not simply remove checks from the normal API. Pinned transfers are lower priority than avoiding repeated host validation/upload, and no further kernel tuning was performed here.
 
-Reproduce with the existing CUDA/OpenMP Release configuration plus `-DPROJECT2_ENABLE_LIFECYCLE_BENCHMARK=ON` in a separate build directory, then run `python -B 03_CUDA_KMeans/python/characterize_cuda_lifecycle.py PATH_TO_phase2_kmeans_cuda_lifecycle.exe fixtures`, `gpu`, and `iterative`. Defaults are seven normal calls and five sequences per R; repeat the two performance commands for confirmation. The driver prints raw JSON and min/median/max summaries. The option is OFF by default and requires CUDA/OpenMP; no new dependency is needed. Generated workloads, raw logs, outputs, and build trees remain ignored. Linux validation, broader crossover, and production ownership remain future work.
+Reproduce with the existing CUDA/OpenMP Release configuration plus `-DPROJECT2_ENABLE_LIFECYCLE_BENCHMARK=ON` in a separate build directory, then run `python -B 03_CUDA_KMeans/python/characterize_cuda_lifecycle.py PATH_TO_phase2_kmeans_cuda_lifecycle.exe fixtures`, `gpu`, and `iterative`. Defaults are seven normal calls and five sequences per R; repeat the two performance commands for confirmation. The driver prints raw JSON and min/median/max summaries. The option is OFF by default and requires CUDA/OpenMP; no new dependency is needed. Generated workloads, raw logs, outputs, and build trees remain ignored. Linux validation and broader crossover remain future work.
+
+## Supported native resident CUDA owner
+
+[`CudaKMeansBuffer`](cpp/include/kmeans_cuda.hpp) is now a supported, noncopyable/nonmovable C++17 RAII API under the existing opt-in CUDA library. Its [implementation](cpp/src/kmeans_cuda_owner.cuh) launches the **unchanged** retained assignment, parallel integer count, tiled FP64 centroid update, and blocking convergence kernels. The normal validated one-shot API remains unchanged and callable. This is ownership engineering, not a new kernel optimization or Python binding.
+
+```cpp
+kmeans::CudaKMeansBuffer buffer(n, d, k); // validate fixed bounds, allocate once
+buffer.upload(input);                   // full validation + pageable H2D
+kmeans::FitMetadata status = buffer.fit(); // independent 100-cap fit; no bulk D2H
+kmeans::Result result = buffer.download(); // new independently owned host vectors
+
+buffer.upload(other_input);             // same N*D; invalidates old fit output
+for (int run = 0; run < 20; ++run) status = buffer.fit();
+result = buffer.download();             // one final bulk download
+```
+
+Every fit starts again from the frozen seed rows of the uploaded input, resets label roles/metadata, and overwrites consumed counts/partials. Repeated fits are independent reruns, **not chained Lloyd refinement**. Only the existing per-update change flag needs resetting. `fit_with_update_cap(1..100)` is a diagnostic counterpart for the frozen nonconvergence fixture; normal `fit()` always uses 100.
+
+Construction fixes `2 <= K <= min(N,32)`, `N <= 2^20`, `1 <= D <= 32`. Upload requires exactly `N*D` finite floats with absolute value at most 1024. Its O(ND) scan and H2D occur once per upload; fit keeps no host-input pointer/vector and cannot rescan it. Caller input is unchanged and can be modified/destroyed after upload. No skip-validation flag weakens one-shot behavior.
+
+Lifecycle: empty -> uploaded -> fitted. Fit before upload and download before a completed fit throw `logic_error`. A successful replacement upload invalidates output; an invalid argument throws `invalid_argument` **without** changing prior input/output. Repeated downloads preserve resident output and allocate independent vectors. Host output-allocation failure also preserves the resident result for retry. CUDA allocation/copy/launch/completion failures throw contextual exceptions; a failed operation poisons an existing owner, whose subsequent upload/fit/download require reconstruction. Partial construction unwinds allocations. Destruction frees all eight resources without throwing; cleanup errors (for example a lost context) cannot be reported by the destructor.
+
+Input, centroids, two label arrays, counts, flag, FP64 centroid partials and integer count partials are allocated once. `device_bytes()` reports requested bytes, not allocator/context overhead: **19,022,916 bytes (18.141666 MiB)** GPU and **658,212 bytes (0.627720 MiB)** iterative, exactly the preceding eight-buffer footprint, with no added persistent device storage. Operations require the construction device to be current; destruction selects that device for cleanup and restores the caller's device where possible. The owner is synchronous, not thread-safe, and must not outlive a CUDA context reset. No multi-GPU support is claimed.
+
+### Supported-owner validation and build
+
+All six public fixtures, six existing FP32/feature edge cases, the N=1025/K=32 signed-zero partial tile, and both measured workloads pass. Each tests 20 independent fits with downloads and X1 -> X2 -> X1 replacement. Labels, update count, convergence and centroid bits match retained CUDA; centroid/inertia errors against NumPy are zero on these cases. The frozen tolerance contract remains authoritative beyond them. Native owner tests additionally cover invalid states/inputs, inclusive bounds, capped/full reseeding, partial count/centroid tiles, 20 X1 plus 20 X2 fits, independent downloads, and host mutation to NaNs after upload (resident results stay unchanged). Input is immutable. No actual CUDA fault was injected; alternate-device checks skip on this single-GPU machine.
+
+All four serial/OpenMP/CUDA/owner CTest targets pass. CPU-only remains valid; CUDA-without-OpenMP also builds/tests, and the owner needs neither Python nor the internal lifecycle benchmark option. For the benchmark only, enable both existing `PROJECT2_ENABLE_CUDA=ON` and `PROJECT2_ENABLE_OPENMP=ON` in the documented Release build; `PROJECT2_ENABLE_LIFECYCLE_BENCHMARK` stays OFF. Run:
+
+```text
+cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build/cuda12_9 -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPROJECT2_ENABLE_CUDA=ON -DPROJECT2_ENABLE_OPENMP=ON -DPROJECT2_ENABLE_LIFECYCLE_BENCHMARK=OFF
+cmake --build 03_CUDA_KMeans/cpp/build/cuda12_9 --config Release
+ctest --test-dir 03_CUDA_KMeans/cpp/build/cuda12_9 -C Release --output-on-failure
+python -B 03_CUDA_KMeans/python/benchmark_cuda_owner.py 03_CUDA_KMeans/cpp/build/cuda12_9/Release/phase2_kmeans_cuda_owner_benchmark.exe fixtures
+python -B 03_CUDA_KMeans/python/benchmark_cuda_owner.py 03_CUDA_KMeans/cpp/build/cuda12_9/Release/phase2_kmeans_cuda_owner_benchmark.exe gpu
+python -B 03_CUDA_KMeans/python/benchmark_cuda_owner.py 03_CUDA_KMeans/cpp/build/cuda12_9/Release/phase2_kmeans_cuda_owner_benchmark.exe iterative
+```
+
+### Fresh native wall timings
+
+Same-session AC-powered Windows laptop, i7-13700H / RTX 4070 Laptop, driver 617.14, CUDA 12.9.86, MSVC 19.44 x64 Release `/O2`, `sm_89`, unchanged `--fmad=false`. Workloads and generators are unchanged: GPU `(262144,16,16)` takes one update, iterative `(16384,8,8)` takes 22. After correctness, one warm-up per boundary precedes seven trials; A–E order rotates, with fresh OpenMP-8 each round. All times are host `steady_clock`, **not kernel/event times**. File I/O, Python/oracle checks and result comparisons are outside timing. B includes owner destruction; C/D/E reuse an existing owner. Fresh host output allocation is included whenever downloading. D still includes launches and blocking per-update flag copies, but no bulk output transfer.
+
+| Boundary | GPU min / median / max (ms) | Iterative min / median / max (ms) |
+| --- | ---: | ---: |
+| A: normal one-shot, including free | 10.6628 / 12.8986 / 23.3603 | 1.4161 / 1.7202 / 2.4510 |
+| B: construct + upload + fit + download + destroy | 9.4114 / 13.6317 / 21.4236 | 1.4971 / 1.6833 / 2.4619 |
+| C: resident fit + download | 2.6481 / 2.7401 / 3.0719 | 1.2174 / 1.4412 / 2.1428 |
+| D: resident fit only | 2.1274 / 2.1727 / 2.2530 | 1.1369 / 1.2344 / 2.2319 |
+| E: upload + fit + download, device allocation excluded | 8.9548 / 11.1210 / 13.1689 | 1.4272 / 1.6278 / 2.4280 |
+| Fresh OpenMP-8 | 18.0232 / 19.2699 / 24.7548 | 3.9760 / 4.4512 / 8.2650 |
+| Construction alone | 0.2245 / 0.2492 / 0.3695 | 0.0152 / 0.0261 / 0.0335 |
+| Destruction alone | 1.0453 / 1.4023 / 13.0145 | 0.0087 / 0.0134 / 0.0176 |
+
+<details>
+<summary>All seven native wall runs (ms), in acquisition order per boundary</summary>
+
+| Boundary | GPU | Iterative |
+| --- | --- | --- |
+| A | 12.7692, 15.1127, 11.3463, 23.3603, 12.8986, 13.4324, 10.6628 | 1.7223, 1.4161, 1.7202, 2.4510, 1.5032, 1.6832, 1.8018 |
+| B | 9.6459, 13.2047, 15.2893, 13.6317, 20.2805, 21.4236, 9.4114 | 1.6258, 2.1986, 1.6693, 2.4619, 1.4971, 1.6860, 1.6833 |
+| C | 2.7401, 2.7199, 2.7389, 2.8239, 2.6481, 3.0719, 2.8075 | 1.2867, 1.5522, 1.4412, 2.1428, 1.2477, 1.2174, 1.4554 |
+| D | 2.1771, 2.1926, 2.1565, 2.2530, 2.1274, 2.1577, 2.1727 | 1.2344, 1.1445, 1.2768, 2.2319, 1.2032, 1.1369, 1.3375 |
+| E | 12.7816, 13.1689, 8.9548, 11.1210, 12.4589, 9.4634, 9.4787 | 1.6279, 1.4272, 1.6278, 2.4280, 1.5887, 1.6329, 1.5750 |
+| OpenMP-8 | 18.0232, 19.2325, 19.1380, 21.3261, 19.2699, 19.9504, 24.7548 | 5.4250, 8.2650, 4.4512, 4.5813, 4.3992, 3.9760, 4.0638 |
+| Construction | 0.2492, 0.3695, 0.2751, 0.3179, 0.2335, 0.2275, 0.2245 | 0.0335, 0.0312, 0.0261, 0.0268, 0.0236, 0.0152, 0.0163 |
+| Destruction | 1.0453, 1.0954, 1.1884, 13.0145, 5.2538, 1.4023, 3.2302 | 0.0176, 0.0164, 0.0134, 0.0147, 0.0119, 0.0087, 0.0094 |
+
+</details>
+
+### Repeated independent fits
+
+One warm sequence per R/boundary, seven paired sequences with alternating boundary order. Both exclude construction/destruction. Fit-only starts from uploaded input; upload-inclusive includes its validation/H2D once, R independent fits, and a final host allocation/download once. Correctness download for fit-only occurs after its timer. Median effective **ms/fit**:
+
+| R | GPU fit only | GPU upload + R fits + download | Iterative fit only | Iterative upload + R fits + download |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.124500 | 9.303700 | 1.258200 | 1.590000 |
+| 2 | 2.158400 | 5.906350 | 1.216000 | 1.371950 |
+| 5 | 2.247260 | 3.630040 | 1.331580 | 1.452220 |
+| 10 | 2.118330 | 2.808470 | 1.427880 | 1.444850 |
+| 20 | 2.116790 | 2.452430 | 1.406415 | 1.424125 |
+
+At R=20, total upload-inclusive median is 49.0486 ms GPU / 28.4825 ms iterative. Effective min/max are 2.439435/2.485595 ms GPU (CV 0.610%), 1.406830/1.462360 ms iterative (CV 1.163%). Fit-only effective min/max are 2.113960/2.118620 ms GPU (CV 0.074%), 1.382790/1.418440 ms iterative (CV 0.786%). The driver emits every raw sequence plus min/median/max/mean/CV; no outliers are removed.
+
+The measured benefit is avoiding repeated validation/upload/allocation, not a changed algorithm. Fresh OpenMP-8 / CUDA median ratios for A, D and E are GPU **1.494x / 8.869x / 1.733x**, iterative **2.588x / 3.606x / 2.734x**. Initial preparation is excluded from D, so it is not a one-call speedup. GPU A/B CV is 27.8%/29.7%, while D is 1.67%; isolated free had a 13.0145 ms outlier. No claim that the new one-call owner is faster than one-shot is justified. Iterative overhead remains and effective times are nonmonotonic; these laptop samples do not establish universal ratios or a cause for driver/scheduling variability.
+
+**Next:** add correctness-first pybind11 one-shot and resident-owner integration. Native ownership, exact tested results, and clear copy/state boundaries are sufficient to expose the demonstrated workflow; neither further kernel tuning nor convergence redesign is a prerequisite. Linux validation, CUDA-fault injection, and broader crossover remain TBD.
 
 ## Planned workflow
 
-Next: turn the validated benchmark-only ownership model into a correctness-first supported native resident owner with explicit upload/fit/download semantics. Python integration, broader size scaling, and library comparisons remain later steps.
+Next: correctness-first pybind11 one-shot and resident-owner integration. Broader size scaling and library comparisons remain later steps.
 
 ## Primary learning goals
 
@@ -431,10 +518,10 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, deterministic tiled centroid reduction, parallel integer counting, and transfer/residency/host-overhead characterization are complete. The two-feature distance-pipeline experiment was rejected. Supported persistent native ownership is next; Python bindings are not yet implemented. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, deterministic tiled centroid reduction, parallel integer counting, transfer/residency/host-overhead characterization, and supported persistent native ownership are complete. The two-feature distance-pipeline experiment was rejected. Python one-shot/resident bindings are next, not yet implemented. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
 - **TBD:** Explain the historical-versus-fresh baseline timing difference; broader independent size/stage scaling remains future work.
-- **TBD:** Production persistent ownership, iterative synchronization's avoidable cost, Linux validation, and broader CPU/GPU crossover; later CUDA layout/fusion decisions remain evidence-dependent.
-- **TBD:** Availability and fair configuration of external libraries; binding approach.
+- **TBD:** Iterative synchronization's avoidable cost, Linux validation, and broader CPU/GPU crossover; later CUDA layout/fusion decisions remain evidence-dependent.
+- **TBD:** Availability and fair configuration of external libraries; pybind11 integration and CUDA failure-injection coverage.

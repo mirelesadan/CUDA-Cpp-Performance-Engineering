@@ -142,7 +142,20 @@ if(PROJECT2_ENABLE_CUDA)
     add_test(NAME phase2_kmeans_cuda_contract_tests
              COMMAND phase2_kmeans_cuda_contract_tests)
 
+    add_executable(phase2_kmeans_cuda_owner_contract_tests src/cuda_owner_contract_tests.cpp)
+    target_link_libraries(phase2_kmeans_cuda_owner_contract_tests PRIVATE project2_kmeans_cuda)
+    target_compile_features(phase2_kmeans_cuda_owner_contract_tests PRIVATE cxx_std_17)
+    set_target_properties(phase2_kmeans_cuda_owner_contract_tests PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME phase2_kmeans_cuda_owner_contract_tests
+             COMMAND phase2_kmeans_cuda_owner_contract_tests)
+
     if(PROJECT2_ENABLE_OPENMP)
+        add_executable(phase2_kmeans_cuda_owner_benchmark src/cuda_owner_benchmark.cpp)
+        target_link_libraries(phase2_kmeans_cuda_owner_benchmark PRIVATE
+            project2_kmeans_cuda project2_kmeans_openmp)
+        target_compile_features(phase2_kmeans_cuda_owner_benchmark PRIVATE cxx_std_17)
+        set_target_properties(phase2_kmeans_cuda_owner_benchmark PROPERTIES CXX_EXTENSIONS OFF)
+
         add_executable(phase2_kmeans_cuda_benchmark src/cuda_benchmark.cpp)
         target_link_libraries(phase2_kmeans_cuda_benchmark PRIVATE
             project2_kmeans_cuda project2_kmeans_openmp)
