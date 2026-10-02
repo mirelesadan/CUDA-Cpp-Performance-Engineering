@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, deterministic tiled FP64 centroid reduction, and parallel integer counting are complete. Transfer/residency and native host-overhead characterization is next.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, deterministic tiled FP64 centroid reduction, parallel integer counting, and native lifecycle characterization are complete. Supported persistent native ownership is next; the current resident owner is benchmark-only.
 
 ## Why this project exists
 
@@ -281,9 +281,119 @@ Ranked remaining opportunities: (1) characterize transfers/residency and native 
 
 Reproduce after the existing Release build with `python -B 03_CUDA_KMeans/python/benchmark_cuda.py PATH_TO_EXE all --compare-count --diagnostic-runs 5`; repeat `primary`, `gpu`, and `iterative` with `--compare-count --diagnostic-runs 0` for confirmation. The driver prints raw runs and correctness evidence. Default and `--compare-tiled` validation remain available; comparison modes are mutually exclusive. Generated inputs, timing outputs, profiler reports, and builds remain ignored.
 
+### CUDA transfer, residency, and native host-overhead characterization
+
+This checkpoint changes **no kernels or normal APIs**. The retained one-shot path is `kmeans_cuda_parallel_count`; plain `kmeans_cuda` remains the original correctness-first control. A separate opt-in benchmark-only owner reuses those exact retained kernels, not a new supported native/Python interface.
+
+**Measured lifecycle:** validate dimensions, size, update cap, finiteness, and magnitude; allocate eight device buffers; pageable input H2D; frozen seed-row centroid initialization; initial assignment; parallel count, tiled centroid update, flag reset, reassignment, and blocking four-byte convergence D2H per pass; allocate fresh host output vectors; labels D2H; centroids D2H; free device buffers. Normal calls create no events and make no explicit `cudaSetDevice`, device query, or standalone `cudaDeviceSynchronize` call. Blocking D2H operations establish completion. Runtime/context first use is warmed before measurement, not claimed as a cold-start result.
+
+The internal owner starts every fit with centroid initialization and initial assignment, restores label-buffer A/B roles, resets host termination state, and retains the original per-update flag reset. Counts and scratch are completely overwritten. Repeated fits are independent deterministic benchmark repetitions, **not chained refinement**.
+
+| Mode | Included in timed wall interval |
+| --- | --- |
+| A, current one-shot | Validation, allocation, upload, full fit, fresh output allocation/download, free |
+| B, preallocated/nonresident input | Validation and upload **every call**, full fit, fresh output allocation/download; device allocation/free outside |
+| C, resident input | Full fresh fit and fresh output allocation/download; validation, allocation, and upload once outside |
+| D, amortized lifecycle | Validation, allocation, upload once, R independent full fits, final output allocation/download once, free |
+
+**Validation/build:** six public fixtures, six feature/FP32 edge cases, a signed-zero all-identical N=1025/K=32 partial tile, and both performance workloads pass. Each case checks 20 resident outputs individually and another final output after 20 fits without intervening downloads. Every timed final output is also checked outside timing. Labels, centroid bits, update counts, convergence flags, and repeated results match retained CUDA; NumPy centroid/inertia error is zero on these cases, and input remains unchanged. Exact centroid parity here is stronger than, and does not replace, the frozen general tolerance contract. All three serial/OpenMP/CUDA CTest targets pass; a fresh default CPU-only build/test also passes.
+
+**Protocol/environment:** Windows laptop, RTX 4070 Laptop GPU, CUDA 12.9.86, MSVC 19.44 x64 Release `/O2`, `sm_89`, unchanged `--fmad=false`, AC power, driver **617.14** (different from the preceding experiment). Normal API and B/C receive three warm-ups; D receives a warm sequence per repetition count. Two same-session blocks provide seven normal runs per mode and five D sequences per R per block. Order rotates within blocks. All samples are retained; pooled results below use 14 normal calls or ten D sequences, not historical fastest runs. A confirmation-only, adjacent uninstrumented shadow lifecycle cross-check measured 10.160500 vs 9.799800 ms normal API on GPU, and 2.183800 vs 2.011100 ms iterative. It is a diagnostic host orchestration, not a replacement speedup baseline.
+
+#### Wall-time boundaries and CPU context
+
+All values are milliseconds, **min / median / max**. GPU is `(262,144,16,16)`, one update; iterative is `(16,384,8,8)`, 22 updates.
+
+| Mode | GPU | Iterative |
+| --- | ---: | ---: |
+| A: current normal one-shot | 9.614700 / 10.072150 / 13.882300 | 1.509300 / 1.719000 / 2.239500 |
+| B: preallocated, validate/upload every fit | 8.541700 / 8.970800 / 12.695200 | 1.500300 / 1.794200 / 5.241500 |
+| C: prevalidated/uploaded input; fit + output | 2.529000 / 2.588950 / 6.447400 | 1.252800 / 1.403150 / 4.794900 |
+| Fresh OpenMP-8 complete fit | 16.785800 / 18.200700 / 23.879600 | 4.301500 / 4.706950 / 5.444900 |
+
+OpenMP-8 / CUDA median ratios for A, C, and D(20) are respectively **1.807×, 7.030×, 5.946×** on GPU and **2.738×, 3.355×, 2.946×** iterative. C excludes initial preparation; D includes amortized preparation. Neither is the current public one-shot behavior. B alone gives modest GPU savings; iterative per-block savings are only ~4–5%, and its pooled medians do not show a reliable improvement. Broad CPU/GPU size crossover was not tested.
+
+The GPU C median moved from 5.248000 ms in the first block to 2.570800 ms in confirmation; its full range remains in the table. Iterative A moved from 1.652200 to 2.011100 ms. Short-call drift/outliers limit precise ratios. No clock/power settings were changed and their contribution was not isolated.
+
+#### Direct host and event diagnostics
+
+Separate host-only shadow runs time the actual validation scan, combined eight allocations/frees, launch/reset API calls, and individual copy calls. Separate CUDA-event runs defer readout until fit completion instead of synchronizing every stage. Event resources are created/destroyed outside all measured sequences (~0.4/~0.2–0.3 ms for this diagnostic pool); normal A/B/C/D use none.
+
+| Interval, cumulative per fit | Host API wall, GPU | Host API wall, iterative | CUDA events, GPU | CUDA events, iterative |
+| --- | ---: | ---: | ---: | ---: |
+| validation | 4.480050 | 0.132700 | — | — |
+| allocation | 0.234950 | 0.110400 | — | — |
+| output_allocation | 0.207900 | 0.005400 | — | — |
+| free | 0.496050 | 0.149950 | — | — |
+| h2d | 2.191500 | 0.050000 | 1.695808 | 0.081456 |
+| initialization | 0.028650 | 0.019550 | 0.042288 | 0.032576 |
+| initial_assignment | 0.004950 | 0.006200 | 0.451584 | 0.008192 |
+| count | 0.007550 | 0.399250 | 0.010240 | 0.186608 |
+| centroid_update | 0.009900 | 0.208150 | 1.180672 | 0.665568 |
+| flag_reset | 0.008350 | 0.075500 | 0.002048 | 0.066560 |
+| reassignment | 0.004250 | 0.088000 | 0.451584 | 0.203792 |
+| flag_d2h | 2.200500 | 0.858250 | 0.029216 | 0.307232 |
+| labels_d2h | 0.186450 | 0.027600 | 0.190528 | 0.026624 |
+| centroids_d2h | 0.025100 | 0.008250 | 0.013520 | 0.012880 |
+
+Host-only diagnostic wall medians are 10.365250 / 2.110750 ms, versus normal A 10.072150 / 1.719000 ms. Their directly measured host intervals leave only about 0.0025 / 0.0040 ms unassigned within those diagnostic calls. However, the diagnostic's overhead/cadence prevents treating that as exact accounting for the separate normal-call median. CPU waits overlap GPU execution: notably, the **host** flag-copy interval includes waiting for preceding kernels and is not four-byte DMA cost. Do not add host API durations to device-event intervals.
+
+The one-shot CUDA-event **path** (algorithm plus H2D, flag copies, and final copies) is GPU 4.138544 ms [3.829376, 7.452736], iterative 1.594704 ms [1.516224, 1.808000]. Algorithm-only event sums, excluding all transfers but including device flag reset, are 2.138416 ms [2.132480, 4.183744] and 1.168624 ms [1.115680, 1.351904]. They are the available device-algorithm estimate, **not pure SM busy time**: event intervals may include submission gaps, especially pageable copies and tiny iterative kernels. Event-diagnostic wall medians rise to 10.450800 / 2.491500 ms; added event submission/readout is therefore not evidence of native algorithm overhead. Per-fit event collection alone is 0.0110 / 0.0281 ms. Independently calculated component medians need not add.
+
+Validation (~4.48 ms) is the largest measured individual GPU-workload host interval; allocation/free (~0.235/0.496 ms) is material but much smaller. Pageable H2D has ~2.19 ms host-call and ~1.70 ms event cost. Removing repeated validation/upload through C therefore has more value than allocation reuse alone. For iterative fits validation is ~0.133 ms and input H2D ~0.050 ms host-call time. The fit instead submits **112 explicit kernels** (two initial plus five per update), 22 flag memsets, and 22 blocking flag copies. Host-only launch/reset API time totals a median 0.800 ms, with 0.858 ms cumulative flag-copy waits; these include runtime submission/backpressure and GPU waits, not isolated pure CPU work. Flag-reset/flag-D2H event medians are 0.066560/0.307232 ms. Iterative synchronization/control is material and does not vanish with residency; its precise avoidable fraction remains unmeasured.
+
+#### Full-lifecycle amortization
+
+D includes preparation and teardown on **each sequence**. Times below retain ten sequences per R; ranges are total wall min/median/max, effective values are median total/R.
+
+| R | GPU total min / median / max | GPU effective ms/fit | Iterative total min / median / max | Iterative effective ms/fit |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 9.736800 / 11.087000 / 15.204100 | 11.087000 | 2.061600 / 2.138550 / 7.866500 | 2.138550 |
+| 2 | 11.928800 / 13.345850 / 15.886700 | 6.672925 | 3.258000 / 3.733100 / 9.456600 | 1.866550 |
+| 5 | 18.169000 / 22.543600 / 31.275600 | 4.508720 | 7.010000 / 7.804550 / 13.705900 | 1.560910 |
+| 10 | 29.518300 / 32.938550 / 39.542900 | 3.293855 | 13.636200 / 17.735650 / 21.903300 | 1.773565 |
+| 20 | 54.418100 / 61.221650 / 77.971300 | 3.061083 | 27.792600 / 31.953850 / 44.417600 | 1.597692 |
+
+Separate event diagnostics provide the following per-effective-fit medians; the host column directly measures validation + allocation/free + output allocation, **not all host overhead**. Launch API times and waits are accounted separately above and overlap device work.
+
+| Workload, R | Algorithm event ms/fit | Once-per-sequence H2D + final D2H / R | Flag D2H event ms/fit | Direct non-fit host ms/fit |
+| --- | ---: | ---: | ---: | ---: |
+| gpu, 1 | 2.141840 | 1.741024 | 0.026672 | 6.913000 |
+| gpu, 2 | 2.288672 | 0.986600 | 0.019712 | 3.954325 |
+| gpu, 5 | 2.126163 | 0.363552 | 0.032931 | 1.340290 |
+| gpu, 10 | 2.511309 | 0.213488 | 0.032237 | 0.772455 |
+| gpu, 20 | 2.476190 | 0.102896 | 0.032690 | 0.392798 |
+| iterative, 1 | 1.244080 | 0.123472 | 0.353456 | 0.192200 |
+| iterative, 2 | 1.271560 | 0.059280 | 0.356144 | 0.092375 |
+| iterative, 5 | 1.249859 | 0.026842 | 0.366720 | 0.037830 |
+| iterative, 10 | 1.271581 | 0.013517 | 0.666674 | 0.018835 |
+| iterative, 20 | 1.385304 | 0.006121 | 0.495585 | 0.009372 |
+
+For GPU, 20-fit wall cost approaches ~3.06 ms/fit, with an uninstrumented fit-method median ~2.54 ms/fit; once-per-sequence transfers shrink to ~0.103 ms/fit. Residency amortizes the dominant validation/upload cost, but finite setup cost and execution variability remain. For iterative input, external transfers are already small; repeated flag exchanges remain per fit. Effective time is not monotonic across R, and 20 fits provide only a modest wall improvement versus A. No asymptotic constant or exact residual cause is inferred by subtracting independently measured medians.
+
+#### Resident device memory
+
+| Buffer | GPU bytes | Iterative bytes |
+| --- | ---: | ---: |
+| input | 16,777,216 | 524,288 |
+| centroids | 1,024 | 256 |
+| labels_a | 1,048,576 | 65,536 |
+| labels_b | 1,048,576 | 65,536 |
+| counts | 64 | 32 |
+| change_flag | 4 | 4 |
+| centroid_partials | 131,072 | 2,048 |
+| count_partials | 16,384 | 512 |
+| Total | 19,022,916 (18.141666 MiB) | 658,212 (0.627720 MiB) |
+
+Requested bytes scale as `4ND + 4KD + 8N + 4K + 4 + 8KD*ceil(N/4096) + 4K*ceil(N/1024)`. This excludes CUDA context/allocator bookkeeping, diagnostic events, host output vectors, and on-chip shared memory. No pinned staging, asynchronous copies, new streams, Python binding, or convergence redesign was introduced.
+
+**Decision:** rank (1) production-quality explicit persistent native ownership with validation at upload, (2) iterative convergence/launch-overhead investigation, (3) centroid Stage-A kernel tuning. The **single next step** is a correctness-first supported native resident owner with explicit validated upload / independent fit / download semantics; Python exposure follows later. Do not simply remove checks from the normal API. Pinned transfers are lower priority than avoiding repeated host validation/upload, and no further kernel tuning was performed here.
+
+Reproduce with the existing CUDA/OpenMP Release configuration plus `-DPROJECT2_ENABLE_LIFECYCLE_BENCHMARK=ON` in a separate build directory, then run `python -B 03_CUDA_KMeans/python/characterize_cuda_lifecycle.py PATH_TO_phase2_kmeans_cuda_lifecycle.exe fixtures`, `gpu`, and `iterative`. Defaults are seven normal calls and five sequences per R; repeat the two performance commands for confirmation. The driver prints raw JSON and min/median/max summaries. The option is OFF by default and requires CUDA/OpenMP; no new dependency is needed. Generated workloads, raw logs, outputs, and build trees remain ignored. Linux validation, broader crossover, and production ownership remain future work.
+
 ## Planned workflow
 
-Next: characterize transfer/residency and native host overhead without changing the retained kernels. Python integration, broader size scaling, and library comparisons follow native CUDA architecture evaluation.
+Next: turn the validated benchmark-only ownership model into a correctness-first supported native resident owner with explicit upload/fit/download semantics. Python integration, broader size scaling, and library comparisons remain later steps.
 
 ## Primary learning goals
 
@@ -321,10 +431,10 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, deterministic tiled centroid reduction, and parallel integer counting are complete. The two-feature distance-pipeline experiment was rejected; transfer/residency and native host-overhead characterization is next. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, deterministic tiled centroid reduction, parallel integer counting, and transfer/residency/host-overhead characterization are complete. The two-feature distance-pipeline experiment was rejected. Supported persistent native ownership is next; Python bindings are not yet implemented. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
 - **TBD:** Explain the historical-versus-fresh baseline timing difference; broader independent size/stage scaling remains future work.
-- **TBD:** Separate transfer/residency and native host overhead, then establish CPU/GPU crossover; later CUDA layout and fusion decisions remain open.
+- **TBD:** Production persistent ownership, iterative synchronization's avoidable cost, Linux validation, and broader CPU/GPU crossover; later CUDA layout/fusion decisions remain evidence-dependent.
 - **TBD:** Availability and fair configuration of external libraries; binding approach.

@@ -1,4 +1,8 @@
 #include "kmeans_cuda.hpp"
+#ifdef KMEANS_LIFECYCLE_BENCHMARK
+#include "kmeans_cuda_lifecycle.hpp"
+#include <cstring>
+#endif
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -787,5 +791,9 @@ CudaUpdatePairTimings benchmark_cuda_update_pair(
     }
     return output;
 }
+
+#ifdef KMEANS_LIFECYCLE_BENCHMARK
+#include "kmeans_cuda_lifecycle.cuh"
+#endif
 
 }  // namespace kmeans

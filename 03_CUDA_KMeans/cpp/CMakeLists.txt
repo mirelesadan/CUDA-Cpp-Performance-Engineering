@@ -30,6 +30,12 @@ option(PROJECT2_ENABLE_PHASE_TIMING "Build separate coarse phase-timing target" 
 option(PROJECT2_ENABLE_PROFILING_SYMBOLS "Emit Release source symbols for sampling" OFF)
 option(PROJECT2_ENABLE_OPENMP "Build the assignment-only OpenMP implementation" OFF)
 option(PROJECT2_ENABLE_CUDA "Build the correctness-first CUDA K-means baseline" OFF)
+option(PROJECT2_ENABLE_LIFECYCLE_BENCHMARK
+       "Build internal CUDA allocation/transfer/residency characterization" OFF)
+if(PROJECT2_ENABLE_LIFECYCLE_BENCHMARK AND
+   (NOT PROJECT2_ENABLE_CUDA OR NOT PROJECT2_ENABLE_OPENMP))
+    message(FATAL_ERROR "Lifecycle benchmark requires CUDA and OpenMP")
+endif()
 set(PROJECT2_CUDA_ARCHITECTURES "89" CACHE STRING
     "CUDA architectures for Project 2 (for example, 89 for Ada)")
 
@@ -116,6 +122,16 @@ if(PROJECT2_ENABLE_CUDA)
     # Keep CUDA fast math/FMA contraction disabled as an additional safeguard.
     target_compile_options(project2_kmeans_cuda PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
+
+    if(PROJECT2_ENABLE_LIFECYCLE_BENCHMARK)
+        target_compile_definitions(project2_kmeans_cuda PRIVATE
+            KMEANS_LIFECYCLE_BENCHMARK)
+        add_executable(phase2_kmeans_cuda_lifecycle src/cuda_lifecycle_benchmark.cpp)
+        target_link_libraries(phase2_kmeans_cuda_lifecycle PRIVATE
+            project2_kmeans_cuda project2_kmeans_openmp)
+        target_compile_features(phase2_kmeans_cuda_lifecycle PRIVATE cxx_std_17)
+        set_target_properties(phase2_kmeans_cuda_lifecycle PROPERTIES CXX_EXTENSIONS OFF)
+    endif()
 
     add_executable(phase2_kmeans_cuda_contract_tests src/cuda_contract_tests.cpp)
     target_link_libraries(phase2_kmeans_cuda_contract_tests PRIVATE
