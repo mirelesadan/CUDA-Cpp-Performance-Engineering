@@ -31,6 +31,9 @@ cmake_install.cmake
 *.cmake.user
 *.exe
 *.dll
+*.pyd
+*.so
+*.dylib
 *.lib
 *.exp
 *.obj

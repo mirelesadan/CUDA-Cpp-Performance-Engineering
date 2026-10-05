@@ -30,6 +30,10 @@ option(PROJECT2_ENABLE_PHASE_TIMING "Build separate coarse phase-timing target" 
 option(PROJECT2_ENABLE_PROFILING_SYMBOLS "Emit Release source symbols for sampling" OFF)
 option(PROJECT2_ENABLE_OPENMP "Build the assignment-only OpenMP implementation" OFF)
 option(PROJECT2_ENABLE_CUDA "Build the correctness-first CUDA K-means baseline" OFF)
+option(PROJECT2_ENABLE_PYTHON "Build the pybind11 CUDA one-shot/resident module" OFF)
+if(PROJECT2_ENABLE_PYTHON AND NOT PROJECT2_ENABLE_CUDA)
+    message(FATAL_ERROR "Project 2 Python CUDA bindings require PROJECT2_ENABLE_CUDA=ON")
+endif()
 option(PROJECT2_ENABLE_LIFECYCLE_BENCHMARK
        "Build internal CUDA allocation/transfer/residency characterization" OFF)
 if(PROJECT2_ENABLE_LIFECYCLE_BENCHMARK AND
@@ -163,6 +167,43 @@ if(PROJECT2_ENABLE_CUDA)
         set_target_properties(phase2_kmeans_cuda_benchmark PROPERTIES
             CXX_EXTENSIONS OFF)
     endif()
+endif()
+
+if(PROJECT2_ENABLE_PYTHON)
+    # Match Project 1: pybind11 belongs to the explicitly selected interpreter.
+    set(PYBIND11_FINDPYTHON ON)
+    find_package(Python 3 REQUIRED COMPONENTS Interpreter Development.Module)
+    execute_process(
+        COMMAND "${Python_EXECUTABLE}" -m pybind11 --cmakedir
+        RESULT_VARIABLE PROJECT2_PYBIND11_RESULT
+        OUTPUT_VARIABLE PROJECT2_PYBIND11_CMAKE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_VARIABLE PROJECT2_PYBIND11_ERROR)
+    if(NOT PROJECT2_PYBIND11_RESULT EQUAL 0)
+        message(FATAL_ERROR "pybind11 is required in the selected Python environment: ${PROJECT2_PYBIND11_ERROR}")
+    endif()
+    find_package(pybind11 CONFIG REQUIRED
+        PATHS "${PROJECT2_PYBIND11_CMAKE_DIR}" NO_DEFAULT_PATH)
+    set_target_properties(project2_kmeans_serial project2_kmeans_cuda
+        PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    pybind11_add_module(kmeans_native MODULE src/python_bindings.cpp)
+    target_link_libraries(kmeans_native PRIVATE project2_kmeans_cuda)
+    target_compile_features(kmeans_native PRIVATE cxx_std_17)
+    set_target_properties(kmeans_native PROPERTIES CXX_EXTENSIONS OFF)
+    if(WIN32)
+        # Match Project 1's Python 3.8+ restricted extension DLL search path.
+        find_file(PROJECT2_CUDART_DLL
+            NAMES "cudart64_${CUDAToolkit_VERSION_MAJOR}.dll"
+            HINTS "${CUDAToolkit_BIN_DIR}" REQUIRED NO_DEFAULT_PATH)
+        add_custom_command(TARGET kmeans_native POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${PROJECT2_CUDART_DLL}" "$<TARGET_FILE_DIR:kmeans_native>"
+            COMMENT "Copying the CUDA runtime beside the Python module")
+    endif()
+    add_test(NAME phase2_kmeans_python_contract_tests
+        COMMAND "${Python_EXECUTABLE}" -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/../python/validate_bindings.py"
+            --module-dir "$<TARGET_FILE_DIR:kmeans_native>")
 endif()
 
 if(MSVC AND PROJECT2_ENABLE_PROFILING_SYMBOLS)

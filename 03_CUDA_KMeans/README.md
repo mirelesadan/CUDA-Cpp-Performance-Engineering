@@ -476,11 +476,105 @@ At R=20, total upload-inclusive median is 49.0486 ms GPU / 28.4825 ms iterative.
 
 The measured benefit is avoiding repeated validation/upload/allocation, not a changed algorithm. Fresh OpenMP-8 / CUDA median ratios for A, D and E are GPU **1.494x / 8.869x / 1.733x**, iterative **2.588x / 3.606x / 2.734x**. Initial preparation is excluded from D, so it is not a one-call speedup. GPU A/B CV is 27.8%/29.7%, while D is 1.67%; isolated free had a 13.0145 ms outlier. No claim that the new one-call owner is faster than one-shot is justified. Iterative overhead remains and effective times are nonmonotonic; these laptop samples do not establish universal ratios or a cause for driver/scheduling variability.
 
-**Next:** add correctness-first pybind11 one-shot and resident-owner integration. Native ownership, exact tested results, and clear copy/state boundaries are sufficient to expose the demonstrated workflow; neither further kernel tuning nor convergence redesign is a prerequisite. Linux validation, CUDA-fault injection, and broader crossover remain TBD.
+**Decision at the native-owner checkpoint:** expose the demonstrated workflow through correctness-first pybind11 one-shot and resident-owner integration, completed below. Linux validation, CUDA-fault injection, and broader crossover remain TBD.
+
+## Python CUDA interface baseline
+
+The opt-in [`kmeans_native` module](cpp/src/python_bindings.cpp) exposes the retained normal CUDA pipeline and exactly one native owner per Python `CudaKMeansBuffer`. Native kernels, one-shot behavior, and owner implementation are unchanged. The interface intentionally keeps the existing vector APIs and their explicit host copies; this is the correctness-first binding baseline.
+
+### Build and import
+
+Reuse the selected Project 1 environment: Python 3.12.7, NumPy 1.26.4, pybind11 3.1.0 in `hanlab`. No new package was installed. Python remains opt-in via `PROJECT2_ENABLE_PYTHON=ON` and requires `PROJECT2_ENABLE_CUDA=ON`; OpenMP is optional for the module, required only for the existing native comparison executable. CMake discovers pybind11 from the selected interpreter as in Project 1, and copies the matching CUDA runtime DLL beside the Windows extension. From the repository root in PowerShell:
+
+```powershell
+conda activate hanlab
+cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build/python_cuda -G "Visual Studio 17 2022" -A x64 -T "cuda=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" -DPROJECT2_ENABLE_CUDA=ON -DPROJECT2_ENABLE_OPENMP=ON -DPROJECT2_ENABLE_PYTHON=ON -DPython_EXECUTABLE="$env:CONDA_PREFIX/python.exe"
+cmake --build 03_CUDA_KMeans/cpp/build/python_cuda --config Release
+ctest --test-dir 03_CUDA_KMeans/cpp/build/python_cuda -C Release --output-on-failure
+python -B 03_CUDA_KMeans/python/validate_bindings.py --module-dir 03_CUDA_KMeans/cpp/build/python_cuda/Release --workloads
+python -B 03_CUDA_KMeans/python/benchmark_bindings.py --module-dir 03_CUDA_KMeans/cpp/build/python_cuda/Release --native-executable 03_CUDA_KMeans/cpp/build/python_cuda/Release/phase2_kmeans_cuda_owner_benchmark.exe --mode all
+```
+
+This builds a local extension, not an installed wheel; add its Release directory to Python's import path. No CPU-only/OpenMP-only/CUDA-without-Python build requires pybind11 or Python discovery. Those three configurations still build and pass their native tests. The Python-enabled CUDA/OpenMP configuration passes all five CTest targets, including public Python contracts. Requesting Python without CUDA gives an explicit configure error. Linux compilation/runtime has not been validated. Extension binaries, DLLs, generated arrays, caches and logs are excluded from Git.
+
+### API, state, and copies
+
+```python
+import sys
+import numpy as np
+sys.path.insert(0, "03_CUDA_KMeans/cpp/build/python_cuda/Release")
+import kmeans_native as km
+
+X = np.array([[-2., -1.]] * 8 + [[2., 1.]] * 8, dtype=np.float32)
+result = km.kmeans_cuda(X, 2)
+# result: {"labels": int32[N], "centroids": float32[K,D],
+#          "update_count": int, "converged": bool}
+
+buffer = km.CudaKMeansBuffer(X.shape[0], X.shape[1], 2)
+buffer.upload(X)
+for _ in range(3):
+    metadata = buffer.fit()  # only update_count and converged; no bulk download
+result = buffer.download()
+buffer.upload(-X)            # replaces input and invalidates previous output
+metadata = buffer.fit()
+replacement = buffer.download()
+```
+
+Input must be a two-dimensional NumPy ndarray with exact native `float32` dtype, C-contiguous layout, `2 <= N <= 2^20`, `1 <= D <= 32`, `2 <= K <= min(N,32)`, finite values and `abs(x) <= 1024`. N/D/K arguments are Python integers, excluding bool. Upload additionally requires exactly the construction `(N,D)` shape. Invalid dtype/layout/shape is rejected, with no conversion, reshape or repair. Valid readonly or unaligned C-contiguous arrays work through the explicit host copy. Input stays unchanged. Labels are independently owned C-contiguous `int32 (N,)`; centroids are independently owned C-contiguous `float32 (K,D)`. Both live beyond temporary C++ results and later owner calls.
+
+Every resident fit reseeds from the uploaded snapshot: three fits are three independent reruns, not chained Lloyd refinement. Upload returns None. Fit/download before their required state raise RuntimeError. Metadata/value validation failures raise TypeError/ValueError (integer overflow raises OverflowError) and preserve previous state. Successful upload invalidates output until fit completes. Repeated downloads remain valid and allocate independent arrays. Native CUDA failures raise contextual RuntimeError and require owner reconstruction, as in C++. Private underscore reduced-cap hooks exist solely for the frozen nonconvergence fixture; benchmark/profiler APIs are not exported.
+
+| Boundary | Explicit copy path |
+| --- | --- |
+| One-shot | NumPy -> temporary `vector<float>` -> H2D -> GPU fit -> D2H -> result vectors -> new NumPy labels/centroids |
+| Owner upload | NumPy -> temporary `vector<float>` -> native validation -> H2D; temporary vector then freed |
+| Owner fit | Uploaded GPU input -> GPU algorithm; only existing per-update flag copies and final host metadata, no bulk result download |
+| Owner download | GPU labels/centroids -> result vectors -> new NumPy arrays |
+
+The binding checks only dtype/layout/shape/bounds before copying. Full finite/magnitude validation occurs **once in the native call**, never a second Python scan. Resident fits retain no host input and do not repeat validation or upload. NumPy metadata/copy/output creation holds the GIL; native construction, upload, fit, download, one-shot computation and cleanup release it. No Python objects are accessed inside released scopes. A nonblocking wrapper guard rejects overlapping operations on the same owner with a busy RuntimeError; the owner remains valid. Operations inherit the native requirement that the construction CUDA device be current, and the object must not outlive a CUDA context reset.
+
+### Python correctness and GIL check
+
+Both APIs pass all six public fixtures (96 labels per API, including the reduced-cap nonconvergence case), six existing FP32/feature edges, extra partial count/centroid tile cases, inclusive bounds, readonly/unaligned inputs, lifecycle errors, invalid input, snapshot replacement and independent output ownership. Primary `(65536,8,16)`, GPU `(262144,16,16)` and iterative `(16384,8,8)` also pass: labels, update counts, convergence and tested centroid bits are exact, with zero centroid/inertia error against NumPy. Frozen centroid/inertia tolerances remain the general contract. Each performance workload checks 20 fits with downloads, three fits without downloads, and X1 -> X2 -> X1 replacement; outputs are deterministic and input remains unchanged.
+
+A bounded concurrency sanity test counted 289,402 Python worker increments while resident fit released the GIL, and immediately rejected the worker's overlapping same-owner download as busy. This check is separate from timing. Actual CUDA faults and alternate-device behavior were not injected/tested here.
+
+### Python/native wall measurements
+
+2026-10-05, AC power, same Windows laptop/RTX 4070 Laptop, driver 617.14, CUDA 12.9.86, MSVC 19.44 x64 Release `/O2`, `sm_89`, unchanged `--fmad=false`. One warm-up per boundary and seven trials; Python API order rotates. Seven paired sequences per R alternate fit-only and upload-inclusive order. All samples are retained. Python uses `perf_counter`; the subsequent same-session native suite uses `steady_clock` on the identical generated arrays. Inputs/oracles/file I/O are outside every timer. Construction excludes destruction; all owner operation/repeated boundaries use an existing allocation. One-shot includes its complete native ownership lifecycle. These are **wall times including host work**, not CUDA-event device algorithm times; prior event estimates are separate evidence.
+
+| Python API boundary | GPU min / median / max (ms) | Iterative min / median / max (ms) |
+| --- | ---: | ---: |
+| One-shot | 14.0831 / 14.3966 / 15.0920 | 1.5708 / 1.6939 / 1.9101 |
+| Construction | 0.1710 / 0.1934 / 0.2084 | 0.0144 / 0.0170 / 0.0238 |
+| Upload | 9.8951 / 10.1646 / 10.6664 | 0.1854 / 0.1941 / 0.2383 |
+| Resident fit only | 2.2345 / 2.2501 / 2.3405 | 1.1198 / 1.2778 / 1.4190 |
+| Download | 0.6036 / 0.6383 / 0.7712 | 0.0323 / 0.0422 / 0.0544 |
+| Upload + fit + download | 12.8571 / 12.9676 / 13.2254 | 1.5001 / 1.6634 / 1.7928 |
+
+All seven Python one-shot runs (ms): GPU `14.3966, 14.4638, 14.2708, 14.0831, 14.1223, 15.0920, 14.6462`; iterative `1.6526, 1.5841, 1.6975, 1.7248, 1.5708, 1.6939, 1.9101`.
+
+Fresh native one-shot runs (ms): GPU `18.8238, 9.8880, 13.7253, 13.7852, 10.2078, 22.9875, 10.1368` (min/median/max `9.8880/13.7253/22.9875`); iterative `5.0435, 1.5148, 1.6257, 1.7413, 1.5569, 1.7084, 1.7893` (`1.5148/1.7084/5.0435`). Native resident-fit medians are `2.1427/1.2797` ms; existing-owner upload/fit/download `8.8231/1.6165` ms; construction `0.1978/0.0283` ms. Python/native median ratios for one-shot, resident fit and upload/fit/download are respectively GPU `1.048910/1.050124/1.469733`, iterative `0.991513/0.998515/1.029013`. These separately sampled intervals do not isolate copy cost: native GPU one-shot/upload-inclusive CVs are 32.55%/41.08%, versus Python 2.23%/0.91%. The small below-one iterative ratios are within variation, not negative binding overhead.
+
+Repeated Python effective medians, **ms/fit**, exclude construction/free. Fit-only excludes upload/download; upload-inclusive performs one validated upload, R independent fits and one final download:
+
+| R | GPU fit only | GPU upload + fits + download | Iterative fit only | Iterative upload + fits + download |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.235500 | 13.155700 | 1.411700 | 1.547600 |
+| 2 | 2.240450 | 7.779100 | 1.246250 | 1.513750 |
+| 5 | 2.131340 | 4.460120 | 1.328200 | 1.498760 |
+| 10 | 2.115610 | 3.275800 | 1.386740 | 1.599960 |
+| 20 | 2.118530 | 2.704095 | 1.541815 | 1.721435 |
+
+At R=20, total upload-inclusive medians are `54.0819/34.4287` ms. GPU effective min/max are `2.674775/2.782845` ms/fit (CV 1.199%), iterative `1.292300/2.043125` (CV 15.310%). The driver prints every raw stage/sequence, min/median/max/mean/CV, and fresh native records; logs/arrays remain local.
+
+Python preserves the large-workload residency benefit: R20 upload-inclusive time is **5.324x** lower per fit than repeated Python one-shot calls in this session, and isolated resident fit is close to native. Copies/validation/transfer remain visible at upload/download and are documented for future experiments. Iterative Python resident fit is also close to native and about **1.326x** faster than Python one-shot, but the longer iterative sequences show drift/outliers and no reliable monotonic amortization claim. No copy optimization or additional kernel work was performed.
+
+**Status/decision:** the native CUDA engineering and correctness-first Python integration milestones are complete for the tested Windows contract. The architecture is ready for external-library comparison and broader scaling. The **single next milestone is a fair scikit-learn comparison** (1.4.2 is already available locally), using the same initial centroids and explicit reporting of any stopping/empty-cluster/precision differences, objective quality and wall-time boundaries. RAPIDS/cuVS feasibility and broader crossover remain separate future studies; none were performed here.
 
 ## Planned workflow
 
-Next: correctness-first pybind11 one-shot and resident-owner integration. Broader size scaling and library comparisons remain later steps.
+Next: a fair scikit-learn comparison using the frozen initialization and explicitly disclosed contract/timing differences. Broader scaling and GPU-library feasibility remain later studies.
 
 ## Primary learning goals
 
@@ -518,10 +612,10 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, deterministic tiled centroid reduction, parallel integer counting, transfer/residency/host-overhead characterization, and supported persistent native ownership are complete. The two-feature distance-pipeline experiment was rejected. Python one-shot/resident bindings are next, not yet implemented. This directory retains its original numeric prefix until a separate repository reorganization.
+Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, deterministic tiled centroid reduction, parallel integer counting, transfer/residency/host-overhead characterization, supported persistent native ownership, and correctness-first Python CUDA integration are complete. The two-feature distance-pipeline experiment was rejected. External-library comparison is next; broader scaling, Linux validation and final project closeout remain open. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
 - **TBD:** Explain the historical-versus-fresh baseline timing difference; broader independent size/stage scaling remains future work.
 - **TBD:** Iterative synchronization's avoidable cost, Linux validation, and broader CPU/GPU crossover; later CUDA layout/fusion decisions remain evidence-dependent.
-- **TBD:** Availability and fair configuration of external libraries; pybind11 integration and CUDA failure-injection coverage.
+- **TBD:** Fair external-library configuration/results, GPU-library availability, and CUDA failure-injection coverage; measured host-copy removal is a later option, not part of this binding baseline.
