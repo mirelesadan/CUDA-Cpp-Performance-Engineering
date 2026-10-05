@@ -2,7 +2,7 @@
 
 This is an in-progress portfolio in correctness-first performance engineering for scientific and high-performance computing. **Project 1 Phases A and B are complete** for their established finite-`float64` Windows contracts. Phase A took a four-dimensional fixed median from an authoritative Python/4Denoise reference through C++17, CPU profiling and optimization, OpenMP, profiled CUDA experiments, transfer/residency analysis, and Python integration. Phase B extended that process to adaptive median filtering, ending with validated persistent adaptive CUDA ownership for Python.
 
-The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means: its Python reference, serial C++ baseline, native profile, measured assignment-addressing improvement, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, deterministic tiled FP64 centroid reduction, parallel integer counting, native lifecycle characterization, supported persistent native ownership, and correctness-first Python CUDA integration are complete. The retained CUDA path preserves exact per-update counts, labels/termination, and centroid bits on the tested workloads. The native owner validates/uploads once, runs independent resident fits, and downloads explicitly; both workflows are exposed through pybind11, with explicit host copies; a fair external-library comparison is next. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
+The retained Phase B split CUDA path includes a measured balanced nine-value min/max reduction. A lower-dependency median network was tested and rejected after a repeatable regression. Native transfer/residency characterization justified explicit GPU ownership. The next active portfolio project is general-purpose CUDA K-means: its Python reference, serial C++ baseline, native profile, measured assignment-addressing improvement, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, deterministic tiled FP64 centroid reduction, parallel integer counting, native lifecycle characterization, supported persistent native ownership, correctness-first Python CUDA integration, and controlled scikit-learn comparison are complete. The retained CUDA path preserves exact per-update counts, labels/termination, and centroid bits on the tested workloads. The native owner validates/uploads once, runs independent resident fits, and downloads explicitly; both workflows are exposed through pybind11, with explicit host copies; the controlled scikit-learn comparison is complete and final closeout/Project 3 transition is next. The earlier 3D-median concept is deferred because its incremental portfolio value is currently smaller and its scientific transformation remains undefined.
 
 ## Current status
 
@@ -36,7 +36,7 @@ The retained Phase B split CUDA path includes a measured balanced nine-value min
 | Phase B adaptive CUDA transfers/residency | Complete | Pageable/pinned one-shot paths and repeated full-device operations measured with exact outputs |
 | Phase B persistent adaptive Python CUDA owner | Complete | Exact public/local/subset/canonical outputs; 20 resident Python calls reached 28.221 ms/filter |
 | Phase B closeout | Complete | Reference, native CPU/OpenMP, profiled CUDA, transfer study, and Python workflow validated together |
-| Project 2 — K-means | Native/Python CUDA integration complete; library comparison next | GPU Python one-shot: 14.397 ms; resident fit: 2.250 ms, excluding preparation/download; 20 independent fits with one upload/final download: 2.704 ms/fit, excluding construction/free |
+| Project 2 — K-means | Implementation and controlled scikit-learn comparison complete; closeout next | GPU Python CUDA one-shot: 15.086 ms vs scikit-learn OMP-8/BLAS-1: 32.673 ms (2.166x faster), with identical labels/nearly identical inertia; resident fit: 2.295 ms, excluding preparation/download |
 | Project 3 — matrix/tensor multiplication | Planned | Operation and validation details remain TBD |
 | 3D-median concept | Deferred | Revisit only if a distinct scientific transformation and new performance question are established |
 
@@ -100,7 +100,8 @@ Python reference
   → Project 2 transfer/residency and native host-overhead characterization [complete]
   → Project 2 supported persistent native CUDA ownership [complete]
   → Project 2 pybind11 one-shot and resident-owner integration [complete]
-  → Project 2 fair scikit-learn comparison [next]
+  → Project 2 fair scikit-learn comparison [complete]
+  → Project 2 final closeout and Project 3 transition [next]
 ```
 
 The work follows a controlled loop: define numerical behavior, validate exactly, establish a fresh baseline, profile, change one meaningful variable, and remeasure.

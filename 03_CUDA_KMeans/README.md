@@ -2,7 +2,7 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative Python contract, serial C++ baseline, CPU profile, retained addressing optimization, assignment-only OpenMP scaling, correctness-first CUDA baseline, focused count/update profiling, deterministic tiled FP64 centroid reduction, parallel integer counting, and native lifecycle characterization are complete. Supported persistent native ownership is next; the current resident owner is benchmark-only.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative contract, profiled CPU/CUDA engineering, supported persistent native ownership, Python CUDA integration, and controlled scikit-learn comparison are complete on the tested Windows environment. Final project closeout and transition to matrix/tensor multiplication are next; the measured scope and remaining limitations are explicit below.
 
 ## Why this project exists
 
@@ -570,11 +570,101 @@ At R=20, total upload-inclusive medians are `54.0819/34.4287` ms. GPU effective 
 
 Python preserves the large-workload residency benefit: R20 upload-inclusive time is **5.324x** lower per fit than repeated Python one-shot calls in this session, and isolated resident fit is close to native. Copies/validation/transfer remain visible at upload/download and are documented for future experiments. Iterative Python resident fit is also close to native and about **1.326x** faster than Python one-shot, but the longer iterative sequences show drift/outliers and no reliable monotonic amortization claim. No copy optimization or additional kernel work was performed.
 
-**Status/decision:** the native CUDA engineering and correctness-first Python integration milestones are complete for the tested Windows contract. The architecture is ready for external-library comparison and broader scaling. The **single next milestone is a fair scikit-learn comparison** (1.4.2 is already available locally), using the same initial centroids and explicit reporting of any stopping/empty-cluster/precision differences, objective quality and wall-time boundaries. RAPIDS/cuVS feasibility and broader crossover remain separate future studies; none were performed here.
+**Decision at the Python-interface checkpoint:** native CUDA engineering and correctness-first Python integration were ready for external-library comparison. The selected fair scikit-learn comparison is completed below. Historical interface timings above remain separate from that fresh comparison; broader crossover and GPU-library feasibility were not measured at this checkpoint.
+
+## Controlled scikit-learn comparison
+
+The [comparison driver](python/compare_sklearn.py) measures the retained implementation without tuning kernels, compiler flags, native APIs, or the frozen numerical contract. This is a bounded external-library comparison, not a claim to outperform scikit-learn generally.
+
+### Configuration and semantic differences
+
+The existing `hanlab` environment provides Python 3.12.7, NumPy 1.26.4, scikit-learn 1.4.2 and threadpoolctl 3.5.0; nothing was installed. The installed Python implementation and official version-tagged Cython sources were inspected, rather than inferring behavior from current-version defaults. Every scikit-learn call is `KMeans(n_clusters=K, init=initial, n_init=1, algorithm="lloyd", max_iter=100, tol=0.0, copy_x=True).fit(X)`. The explicit C-contiguous float32 initialization array is prepared before timing from rows `((2*k+1)*N)//(2*K)`, in the original cluster order. Both libraries receive the same unchanged float32 input, with no weights or restarts; scikit-learn returns float32 centers.
+
+| Concern | Project 2 | Installed scikit-learn 1.4.2 dense Lloyd |
+| --- | --- | --- |
+| Initialization | Exact fixed input rows, one run | Same rows supplied explicitly, `n_init=1`; copies/centers them internally |
+| Assignment | Ordered separate FP32 subtract/square/add | Centers input; computes `||C||² - 2XCᵀ` using FP32 BLAS, omitting the row-constant input norm |
+| Ties | Lowest index for an exact computed-distance tie | First index for an exact computed-score tie in this implementation; different rounding can change which scores tie |
+| Centroid update | Deterministic FP64 accumulation, division then FP32 rounding | FP32 thread-local sums, lock-protected reduction with no fixed arrival order, reciprocal/multiply averaging |
+| Empty clusters | Retain old center | Relocate farthest assigned samples; unresolved empties use the largest cluster's center |
+| Stopping | Initial assignment, then label-unchanged update/reassignment passes | Assignment/update iterations; unchanged labels or center shift at/below tolerance, final assignment if not strict convergence |
+| Copies and centering | Explicit NumPy/vector copies and H2D/D2H for one-shot | Safe/default `copy_x=True`: input and initialization copied, input mean subtracted, mean restored to final centers |
+
+`tol=0.0` is supported and makes the tolerance exactly zero; it does not disable a zero-center-shift stop or make the stopping/iteration definitions identical. Tie/reduction details above are implementation observations, not additional promises of the scikit-learn public API. Sources: [1.4.2 KMeans API](https://scikit-learn.org/1.4/modules/generated/sklearn.cluster.KMeans.html), [Python fit/stopping source](https://github.com/scikit-learn/scikit-learn/blob/1.4.2/sklearn/cluster/_kmeans.py), [dense Lloyd source](https://github.com/scikit-learn/scikit-learn/blob/1.4.2/sklearn/cluster/_k_means_lloyd.pyx), [empty-center/update helpers](https://github.com/scikit-learn/scikit-learn/blob/1.4.2/sklearn/cluster/_k_means_common.pyx).
+
+### Thread controls and timing boundaries
+
+On 2026-10-05, the same AC-powered Windows/i7-13700H/RTX 4070 Laptop session used the existing MSVC x64 Release `/O2`, CUDA 12.9, `sm_89`, and unchanged `--fmad=false` build. Sampling/phase instrumentation remained off. Before timing, nested `threadpoolctl` contexts set BLAS to one thread **first**, then OpenMP to eight; applying the BLAS setting loads Intel OpenMP before its limit is set. Runtime inspection confirmed MKL 2023.2 Intel BLAS=1, Microsoft `vcomp140` OpenMP=8 and Intel `libiomp5md` OpenMP=8. The effective scikit-learn helper and every fitted estimator reported eight threads. These are configured budgets, not measured core utilization. The native OpenMP path requests and checks an actual eight-thread assignment team; its available logical-processor count is 20. No default-thread sweep or `copy_x=False` shortcut was used. [Supported thread controls](https://scikit-learn.org/1.4/computing/parallelism.html).
+
+The harness imports the CUDA extension before scikit-learn: the reverse order caused a native access violation before any timing in this environment. The successful order passed runtime checks and the complete comparison; the underlying DLL interaction remains unestablished. No package/system/native-code workaround was applied. Joblib's physical-core discovery also warns and falls back to logical cores; the explicitly verified eight-thread budget is unaffected.
+
+One warm-up and seven trials per boundary use `perf_counter`, rotating scikit-learn fit, CUDA one-shot, resident fit, construction, upload and download. Initialization/data generation, oracle/quality calculations, thread-control setup and file I/O are outside all timers. Scikit-learn includes estimator construction and complete normal `.fit(X)` work; CUDA one-shot includes its normal host copies, validation, allocation, transfers, computation and result construction. Those are the primary user-facing comparison. Resident fit is secondary: allocation, validated upload and bulk download are excluded. Construction excludes destruction; upload/download include their normal copies. Native OpenMP uses the unchanged executable's `steady_clock` complete-fit boundary, including native validation/output allocation but excluding the Python/file bridge; its separate adjacent block is context, not an identical Python API boundary. All samples are retained. These are wall times, not CUDA-event device times, and independent stage medians must not be added as exact accounting.
+
+Reproduce after building the Python module above:
+
+```powershell
+python -u -B 03_CUDA_KMeans/python/compare_sklearn.py --module-dir 03_CUDA_KMeans/cpp/build/python_cuda/Release --openmp-executable 03_CUDA_KMeans/cpp/build/python_cuda/Release/phase2_kmeans_openmp_scaling.exe --mode all --runs 7
+```
+
+### Output quality and iteration context
+
+The unchanged version-1 generators use primary `(65536,8,16)` seed `20260924`, GPU `(262144,16,16)` seed `20260925`, and iterative `(16384,8,8)` seed `20260927`. CUDA results match the authoritative NumPy contract; native serial/OpenMP results match it too. Input and initialization remain unchanged. Scikit-learn is compared directly by the original cluster indices, with **no permutation** and no demand that the six semantic fixtures serve as its contract tests.
+
+All seven scikit-learn trials have 100% exact label agreement: `65536/65536`, `262144/262144`, and `16384/16384`. Every fit reports the same iteration count within its workload. The table reports the largest centroid/inertia differences observed across the seven fits, not a favorable single trial. Feature scale is `S_j=max(1,max_i|X[i,j]|)`; both inertias are independently recomputed by the same bounded FP64 diagnostic, not taken from `sklearn.inertia_`.
+
+| Workload | sklearn iterations / Project 2 updates | Max centroid abs / feature-scaled difference | Max inertia absolute / relative difference |
+| --- | ---: | ---: | ---: |
+| Primary | 2 / 1 | 2.861023e-6 / 3.175974e-7 | 7.235940e-7 / 2.204219e-11 |
+| GPU | 2 / 1 | 5.722046e-6 / 6.297798e-7 | 1.174345e-5 / 4.476742e-11 |
+| Iterative | 23 / 22 | 9.536743e-7 / 8.446737e-8 | 7.101335e-9 / 1.419759e-14 |
+
+Recomputed Project 2 / final-trial scikit-learn inertia is respectively `32827.68637102876 / 32827.68637175235`, `262321.4204471333 / 262321.42045883933`, and `500178.7404378790 / 500178.7404378834`. Quality is effectively identical on these inputs, although centroid bits differ and small scikit-learn reduction variation is observed. This does not establish parity on arbitrary ties, empty clusters or sensitive inputs.
+
+Secondary work-count context avoids misleading division by reported iterations: Project 2 performs `2/2/23` assignment passes and `1/1/22` centroid updates; scikit-learn's recorded `2/2/23` Lloyd iterations each perform assignment and update, hence one additional centroid update. Scikit-learn can also perform a final assignment after non-strict stopping; the harness did not instrument its stopping branch, so total assignment-pass parity is not asserted. Whole-fit timings still include different arithmetic, validation, centering and result work; neither reported iteration count is a universally equivalent work unit. No normalized per-iteration speedup is claimed.
+
+### Fresh measurements
+
+All values below are milliseconds, in acquisition order. Complete raw timings, min/median/max and population CV are preserved; no outlier was removed.
+
+| Workload / boundary | Seven raw calls | Min / median / max | CV |
+| --- | --- | ---: | ---: |
+| Primary sklearn fit | 7.0074, 6.9141, 6.6513, 7.7057, 7.7132, 9.5203, 7.4589 | 6.6513 / 7.4589 / 9.5203 | 11.66% |
+| Primary CUDA one-shot | 3.4968, 2.1899, 2.6266, 2.2576, 2.6629, 2.3881, 2.5010 | 2.1899 / 2.5010 / 3.4968 | 15.64% |
+| Primary resident fit | 0.3045, 0.2844, 0.5136, 0.2827, 0.3179, 0.3455, 0.3154 | 0.2827 / 0.3154 / 0.5136 | 22.06% |
+| Primary construction | 0.1121, 0.0888, 0.1410, 0.0959, 0.1536, 0.0891, 0.1552 | 0.0888 / 0.1121 / 0.1552 | 23.22% |
+| Primary upload | 2.2323, 1.2631, 1.2123, 2.0312, 1.2096, 1.9277, 2.0382 | 1.2096 / 1.9277 / 2.2323 | 24.61% |
+| Primary download | 0.0828, 0.1221, 0.0868, 0.1185, 0.0918, 0.1739, 0.1297 | 0.0828 / 0.1185 / 0.1739 | 25.69% |
+| Primary native OpenMP-8 | 2.8487, 2.7153, 2.9035, 2.7578, 2.8395, 2.6910, 3.0066 | 2.6910 / 2.8395 / 3.0066 | 3.65% |
+| GPU sklearn fit | 37.1723, 32.4224, 32.6734, 30.4826, 33.9599, 30.2469, 40.8374 | 30.2469 / 32.6734 / 40.8374 | 10.41% |
+| GPU CUDA one-shot | 14.9099, 14.2033, 14.4551, 15.2326, 15.0863, 15.9705, 19.3422 | 14.2033 / 15.0863 / 19.3422 | 10.36% |
+| GPU resident fit | 2.2881, 2.2579, 2.3495, 2.2947, 2.3450, 2.2695, 2.2956 | 2.2579 / 2.2947 / 2.3495 | 1.41% |
+| GPU construction | 0.2952, 0.1757, 0.2276, 0.1824, 0.3017, 0.1909, 0.1868 | 0.1757 / 0.1909 / 0.3017 | 22.53% |
+| GPU upload | 13.0842, 10.0244, 10.9442, 10.1269, 9.7126, 12.5207, 17.3518 | 9.7126 / 10.9442 / 17.3518 | 20.91% |
+| GPU download | 0.6075, 0.6577, 0.6029, 0.6158, 0.6031, 0.6661, 0.8085 | 0.6029 / 0.6158 / 0.8085 | 10.51% |
+| GPU native OpenMP-8 | 18.2447, 28.2974, 18.5307, 19.2247, 19.2075, 16.7423, 22.6698 | 16.7423 / 19.2075 / 28.2974 | 17.74% |
+| Iterative sklearn fit | 7.6235, 8.6097, 8.5941, 8.1235, 8.0971, 9.0652, 6.8694 | 6.8694 / 8.1235 / 9.0652 | 8.26% |
+| Iterative CUDA one-shot | 1.7556, 1.9897, 1.8467, 2.6547, 3.6032, 1.8790, 1.9689 | 1.7556 / 1.9689 / 3.6032 | 27.62% |
+| Iterative resident fit | 1.3696, 1.4351, 1.5374, 1.8562, 3.0521, 1.3394, 1.7897 | 1.3394 / 1.5374 / 3.0521 | 31.44% |
+| Iterative construction | 0.2356, 0.0213, 0.0275, 0.0209, 0.0326, 0.0256, 0.0236 | 0.0209 / 0.0256 / 0.2356 | 133.27% |
+| Iterative upload | 0.2402, 0.2299, 0.1922, 0.1923, 0.4243, 0.2180, 0.1945 | 0.1922 / 0.2180 / 0.4243 | 31.74% |
+| Iterative download | 0.0889, 0.0414, 0.0326, 0.0591, 0.0469, 0.0800, 0.0439 | 0.0326 / 0.0469 / 0.0889 | 34.73% |
+| Iterative native OpenMP-8 | 5.2401, 4.9484, 5.1781, 4.7541, 4.8405, 4.8262, 5.5600 | 4.7541 / 4.9484 / 5.5600 | 5.32% |
+
+| Workload | sklearn complete Python fit | Project 2 native OpenMP-8 | Project 2 Python CUDA one-shot | Project 2 persistent resident fit |
+| --- | ---: | ---: | ---: | ---: |
+| Primary | 7.4589 ms | 2.8395 | 2.5010 | 0.3154 |
+| GPU | 32.6734 ms | 19.2075 | 15.0863 | 2.2947 |
+| Iterative | 8.1235 ms | 4.9484 | 1.9689 | 1.5374 |
+
+Using fresh medians, Project 2 CUDA one-shot is **2.982x / 2.166x / 4.126x faster** than controlled scikit-learn on primary/GPU/iterative respectively. Native OpenMP-8 is **2.627x / 1.701x / 1.642x faster**, with the native/Python boundary caveat above. Resident fit is **23.649x / 14.239x / 5.284x faster as a prepared device-resident workflow**, not an equivalent one-shot comparison. The GPU resident median has 1.41% CV; iterative CUDA one-shot/resident CVs are 27.62%/31.44%, so absolute iterative results are less stable. No causally precise overhead breakdown or universal winner is claimed.
+
+The existing residency study remains separate historical evidence; its R20 numbers are not substituted for these fresh timings. This comparison confirms comparable quality and a practical one-shot benefit on the three tested datasets. It does not locate a broad N/D/K crossover, compare default/best scikit-learn threads, or establish general-library superiority.
+
+**Closeout assessment and one next milestone:** native CUDA engineering, Python integration and this controlled CPU-library comparison are complete on tested Windows. Recommend final Project 2 closeout and transition to Project 3 matrix/tensor multiplication, which adds more portfolio breadth than further K-means micro-tuning. Broader scaling is an explicitly deferred optional study, not falsely marked measured. `cuml`/`cuvs` are absent locally; [RAPIDS' Windows route requires WSL2/Linux](https://docs.nvidia.com/datascience/install/#windows-wsl2), so another GPU comparator would entail a separate environment and portability effort. Linux, fault injection and the import-order interaction remain disclosed limitations. No further comparison, optimization or Project 3 implementation was begun here.
 
 ## Planned workflow
 
-Next: a fair scikit-learn comparison using the frozen initialization and explicitly disclosed contract/timing differences. Broader scaling and GPU-library feasibility remain later studies.
+Next: final Project 2 closeout and transition to Project 3 matrix/tensor multiplication. Broader scaling and GPU-library feasibility are optional deferred studies, not completed claims or prerequisites for that transition.
 
 ## Primary learning goals
 
@@ -612,10 +702,10 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Active Project 2. Python reference, deterministic fixtures, correctness-first serial C++ baseline, native profiling, retained serial address-generation optimization, assignment-only portable OpenMP scaling, exact correctness-first CUDA baseline, focused count/update Nsight profiling, deterministic tiled centroid reduction, parallel integer counting, transfer/residency/host-overhead characterization, supported persistent native ownership, and correctness-first Python CUDA integration are complete. The two-feature distance-pipeline experiment was rejected. External-library comparison is next; broader scaling, Linux validation and final project closeout remain open. This directory retains its original numeric prefix until a separate repository reorganization.
+Project 2 implementation and its controlled scikit-learn comparison are complete for the tested Windows scope. The two-feature distance-pipeline experiment was rejected. Final closeout is next; broader independent scaling, GPU-library comparison and Linux validation are explicitly deferred rather than reported complete. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 
 - **TBD:** Explain the historical-versus-fresh baseline timing difference; broader independent size/stage scaling remains future work.
 - **TBD:** Iterative synchronization's avoidable cost, Linux validation, and broader CPU/GPU crossover; later CUDA layout/fusion decisions remain evidence-dependent.
-- **TBD:** Fair external-library configuration/results, GPU-library availability, and CUDA failure-injection coverage; measured host-copy removal is a later option, not part of this binding baseline.
+- **TBD:** GPU-library comparison and CUDA failure-injection coverage; host-copy removal is a later option, not part of this binding baseline. The observed Windows import-order failure remains unexplained; the comparison uses the documented successful order.
