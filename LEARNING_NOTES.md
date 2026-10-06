@@ -169,7 +169,7 @@ Track throughput, latency, resource limits, and crossover behavior as workload d
 Understand how compiled modules expose native functions and represent errors and types.
 
 ### pybind11 or alternatives
-Evaluate binding options against project needs before choosing one; the decision is **TBD**.
+Projects 1 and 2 use pybind11 with explicit array/copy/lifetime contracts; choose bindings for later projects from their requirements rather than treating this as a universal choice.
 
 ### NumPy array interoperability
 Study dtype, shape, strides, contiguity, writable state, and buffer access.

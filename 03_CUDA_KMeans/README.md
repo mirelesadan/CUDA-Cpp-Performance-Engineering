@@ -2,7 +2,47 @@
 
 ## Objective
 
-Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative contract, profiled CPU/CUDA engineering, supported persistent native ownership, Python CUDA integration, and controlled scikit-learn comparison are complete on the tested Windows environment. Final project closeout and transition to matrix/tensor multiplication are next; the measured scope and remaining limitations are explicit below.
+Develop, profile, validate, and optimize a general-purpose K-means implementation across Python/reference, C++, CPU-optimized, and CUDA stages. The authoritative contract, profiled CPU/CUDA engineering, supported persistent native ownership, Python CUDA integration, and controlled scikit-learn comparison are complete on the tested Windows environment. Final closeout is complete for this tested scope; the proposed Project 3 FP32 GEMM contract awaits approval. The measured scope and remaining limitations are explicit below.
+
+## Final closeout — tested Windows scope
+
+Project 2 is complete for the frozen contract and tested workloads. This documentation audit uses established validation/timing records; it does not claim a new test or benchmark run. The retained progression is:
+
+```text
+NumPy contract -> straightforward serial C++ -> CPU profiling
+  -> row-pointer addressing (retained) -> two-feature scheduling (rejected)
+  -> assignment-only OpenMP -> correctness-first CUDA -> Nsight profiling
+  -> deterministic tiled FP64 centroid reduction -> parallel integer counting
+  -> lifecycle/residency analysis -> supported native persistent owner
+  -> pybind11 one-shot/resident API -> controlled scikit-learn comparison
+```
+
+### Representative measured results
+
+These rows belong to separate controlled experiments, not one cumulative speedup chain. Detailed raw runs, quality checks and timing boundaries remain in the sections below.
+
+| Evidence | Representative result and boundary |
+| --- | --- |
+| CPU assignment decomposition | Primary complete-fit medians: addressed serial 28.0908 ms -> OpenMP-8 6.7966 ms, **4.133x**; separate confirmation **4.069x** |
+| Initial CUDA architecture | Centroid update consumed about **81% / 92% / 84%** of primary/GPU/iterative device-algorithm diagnostics; one block underfilled 36 SMs |
+| Tiled centroid update | GPU direct-stage medians 33.512447 -> 1.202048 ms, **27.879x**; not a whole-fit ratio |
+| Parallel integer count | GPU direct-stage medians 3.167008 -> 0.024064 ms, **131.608x**; not a whole-fit ratio |
+| Final Python one-shot comparison | Primary/GPU/iterative CUDA 2.5010 / 15.0863 / 1.9689 ms vs controlled sklearn 7.4589 / 32.6734 / 8.1235 ms: **2.982x / 2.166x / 4.126x** |
+| Separate amortized workflow | Earlier GPU R20 Python residency: **2.704095 ms/fit vs 14.3966 ms one-shot, 5.324x**; one upload/final download, construction/free excluded; not the final sklearn session |
+
+The sklearn comparison uses identical initial centroids, OMP-8/BLAS-1, and complete Python-call boundaries, with differing arithmetic, centering, stopping and empty-cluster behavior disclosed. All seven trials matched labels on the three inputs; worst feature-scaled centroid difference was below 6.30e-7 and relative recomputed-inertia difference below 4.48e-11. This is tested comparable quality, not general algorithmic equivalence. Resident-fit timings exclude preparation/download unless explicitly included in the amortized workflow; they are not equivalent to one-shot library calls.
+
+### Engineering lessons and limits
+
+- CPU assignment dominated (~91-92% of samples). A simple row-pointer change helped; a two-feature schedule preserved correctness but regressed and was discarded. Source-level simplicity was more valuable than an assumed pipeline improvement.
+- The naive CUDA reduction exposed too little device-wide parallelism. Nsight justified many tiled FP64 partial reductions with deterministic finalization, not a speculative memory-bandwidth fix. Tested centroid bits matched, but the frozen tolerance contract remains authoritative for reordered sums.
+- Integer counting became the next bottleneck and was parallelized separately. Stage-specific gains must not be presented as whole-fit gains or multiplied across sessions.
+- After these kernel changes, host validation, upload and ownership mattered. A supported persistent owner avoids repeating those costs and improves independent repeated fits without redefining Lloyd semantics.
+- Mature-library comparisons require explicit numerical/work-count and timing boundaries. Fair controls and preserved medians matter more than selecting a fastest run.
+
+Limits remain: Windows-only validation; broad independent N/D/K crossover unmeasured; RAPIDS/cuVS and Linux deferred; no CUDA fault injection; unexplained Windows import-order interaction; laptop timing variation; resident fits are a different execution model from one-shot calls. These optional investigations do not block closeout.
+
+Repository cleanup found no tracked builds, binaries, generated workload arrays, profiler reports, caches or temporary files. Existing ignore rules and temporary generators remain in place. Stale current-status/next-step wording was corrected without changing source layout, results or public fixtures; the legacy `03_` prefix remains. Next portfolio work is the proposed [Project 3 FP32 GEMM contract](../04_CUDA_Matrix_Multiplication/README.md), awaiting approval before reference/fixture implementation.
 
 ## Why this project exists
 
@@ -159,7 +199,7 @@ Coarse phase timers were enabled only in a separate Release build, not the speed
 | Iterative OpenMP-8 | 9.9627 | 7.4784 | 2.0292 | 20.4% |
 | Iterative OpenMP-16 | 11.4459 | 7.9310 | 3.0170 | 26.4% |
 
-Assignment still consumes about 69–78% of phase-timed fits at higher thread counts. Repeated serial updates become a meaningful ceiling in the iterative case but are not the sole or dominant scaling limit; 16–20 threads also show worse/noisy whole-fit results. Equal-size static chunks make sample-count imbalance unlikely, while hybrid-core scheduling, cache/memory effects, and repeated parallel-region overhead remain plausible but unmeasured. This readable CPU path is retained; the next portfolio experiment is a correctness-first CUDA K-means baseline, **not** a numerically risky parallel centroid reduction with limited primary-workload upside.
+Assignment still consumes about 69–78% of phase-timed fits at higher thread counts. Repeated serial updates become a meaningful ceiling in the iterative case but are not the sole or dominant scaling limit; 16–20 threads also show worse/noisy whole-fit results. Equal-size static chunks make sample-count imbalance unlikely, while hybrid-core scheduling, cache/memory effects, and repeated parallel-region overhead remain plausible but unmeasured. This readable CPU path is retained; this checkpoint selected the correctness-first CUDA K-means baseline completed below, **not** a numerically risky parallel centroid reduction with limited primary-workload upside.
 
 Reproduce with `cmake -S 03_CUDA_KMeans/cpp -B 03_CUDA_KMeans/cpp/build -DPROJECT2_ENABLE_OPENMP=ON` (add the appropriate platform generator/Release selection), then build Release and run CTest plus `python -B 03_CUDA_KMeans/python/benchmark_openmp.py PATH_TO_SCALING_EXE fixtures`, `profiling`, or `iterative_profile`. The driver defaults to this machine's 1/2/4/8/16/20 counts and accepts `--counts` for other hosts. A separate ignored build with `-DPROJECT2_ENABLE_PHASE_TIMING=ON` supplies the optional `--phase-executable` comparison. Generated workloads, binaries, and timing logs are not committed.
 
@@ -179,7 +219,7 @@ On the AC-powered RTX 4070 Laptop GPU, CUDA 12.9, sm_89, and MSVC Release `/O2`,
 | GPU | 58.461, 66.186, 58.544, 80.273, 63.984, 58.795, 66.131 (63.984) | 17.797, 19.031, 18.697, 18.047, 19.216, 19.871, 18.211 (18.697) | 50.375, 50.216, 50.845, 54.638, 50.461, 49.037, 60.156 (50.461) |
 | Iterative | 16.914, 20.368, 19.272, 21.934, 18.242 (19.272) | 4.667, 6.205, 4.430, 5.172, 5.709 (5.172) | 38.090, 36.240, 36.158, 36.986, 48.044 (36.986) |
 
-Fresh serial/OpenMP-8 speedups versus CUDA native wall were `1.384×/0.347×` primary, `1.268×/0.371×` GPU, and `0.521×/0.140×` iterative; ratios below one mean CUDA is slower. Absolute laptop CPU time has varied across sessions, so only these same-session ratios are used. This deliberately unoptimized CUDA baseline is not yet competitive with OpenMP-8 on these workloads.
+Fresh serial/OpenMP-8 speedups versus CUDA native wall were `1.384×/0.347×` primary, `1.268×/0.371×` GPU, and `0.521×/0.140×` iterative; ratios below one mean CUDA is slower. Absolute laptop CPU time has varied across sessions, so only these same-session ratios are used. This deliberately unoptimized CUDA control was not competitive with OpenMP-8 on these workloads; later retained reductions are reported below.
 
 Three separate event-instrumented fits per workload provide directional cumulative stage medians (ms), not the normal-call speedup denominator:
 
@@ -214,7 +254,7 @@ Source mapping places count's label load/comparison/increment together at its in
 
 On this all-nonempty GPU workload, count logically inspects `N·K = 4,194,304` labels per Lloyd update; update inspects `N·K·D = 67,108,864` labels while accumulating only `N·D = 4,194,304` input feature values. These are algorithmic operation counts, **not** DRAM traffic: they scale as `O(NK)`, `O(NKD)`, and `O(ND)` respectively. Empty clusters skip their update scans, making `N·K_nonempty·D` the general update count. The frozen contract requires exact labels, update count/convergence, centroid error at most `5e-6 × feature_scale`, and inertia error at most `2e-5 × scale` (with an exact-zero-inertia fixture). The baseline's bitwise-identical centroids are stronger than that contract; even a deterministic fixed-order parallel FP64 reduction can change sample-order sum bits. The current CUDA benchmark also applies a stronger exact-bit gate, so a future non-bitwise candidate must deliberately distinguish that control comparison from frozen contractual validation without weakening exact label/termination checks.
 
-Ranked designs: (1) **deterministic two-stage centroid reduction**—parallel fixed sample tiles produce FP64 partial sums, followed by a fixed-order final reduction using the unchanged count kernel; highest expected gain from many blocks and a shorter sum chain, moderate complexity and rounding-order risk. (2) **parallel integer count reduction**, leaving ordered centroid sums untouched; low numerical risk and moderate complexity but addresses only the smaller count stage. (3) **atomic FP64 sum/count accumulation**; ample parallelism but contention, nondeterministic FP64 order, and the highest reproducibility risk. The selected next *single* experiment is design 1, with the current count kernel and assignment unchanged. No kernel optimization was made during this checkpoint.
+Ranked designs: (1) **deterministic two-stage centroid reduction**—parallel fixed sample tiles produce FP64 partial sums, followed by a fixed-order final reduction using the unchanged count kernel; highest expected gain from many blocks and a shorter sum chain, moderate complexity and rounding-order risk. (2) **parallel integer count reduction**, leaving ordered centroid sums untouched; low numerical risk and moderate complexity but addresses only the smaller count stage. (3) **atomic FP64 sum/count accumulation**; ample parallelism but contention, nondeterministic FP64 order, and the highest reproducibility risk. This checkpoint selected design 1, implemented below with the count kernel and assignment held unchanged. No kernel optimization was made during this checkpoint.
 
 ### Isolated CUDA experiment — deterministic tiled FP64 centroid reduction
 
@@ -226,7 +266,7 @@ For the GPU workload, persistent device buffers, copied input, and frozen first-
 
 Normal whole-fit Release `steady_clock` comparisons included allocations, validation, H2D, computation, D2H, and teardown, with three warm-ups per CUDA variant. GPU control/candidate fits ran adjacently in alternating AB/BA order; CPU controls ran in the same AC-powered session, and output checks were outside the timer. Fresh control/tiled/OpenMP-8 medians (ms) were primary `7.6621/3.2920/2.9560` (7 runs; CUDA `2.327×`), GPU `45.5468/12.9150/19.1134` (7 runs; `3.527×`), and iterative `32.8411/6.9164/4.8964` (5 runs; `4.748×`). The GPU tiled fit beats fresh OpenMP-8 by `1.480×`; the other two sizes do not. Separate event-instrumented fits put 22-update cumulative tiled centroid work at `0.760640` ms versus `26.269760` ms for the control; these diagnostic medians are not whole-fit speedup denominators. Cross-session GPU-clock and transfer/initialization variability remain, so claims use fresh paired medians, not best runs.
 
-A focused Nsight Compute 2025.2.1 check on a warmed normal Stage-A launch found 39 registers/thread, 2 KiB static shared memory/block, zero local load/store sectors, 98.71% occupancy (47.38 active warps/SM), 86.88% device-wide SM throughput, 6.50% DRAM throughput, and 91.06% cycles with no eligible scheduler warp; L1TEX-queue throttle dominated at about 62.2% of cycles per issued instruction. Stage B had 36 registers/thread and one block, so still underfills the GPU, but its direct-event median was only ~1% of candidate update time. The grid-wide occupancy/SM-throughput change and shorter per-thread sum chains support the speedup; no logical `N·K·D` label scans were eliminated, and the relative contribution of those two improvements was not isolated. The candidate is retained. The now-unchanged count kernel costs about 3.02 ms on the GPU and 4.62 ms cumulatively over 22 iterative updates, exceeding the new centroid-update cost; isolated parallel integer counting is next.
+A focused Nsight Compute 2025.2.1 check on a warmed normal Stage-A launch found 39 registers/thread, 2 KiB static shared memory/block, zero local load/store sectors, 98.71% occupancy (47.38 active warps/SM), 86.88% device-wide SM throughput, 6.50% DRAM throughput, and 91.06% cycles with no eligible scheduler warp; L1TEX-queue throttle dominated at about 62.2% of cycles per issued instruction. Stage B had 36 registers/thread and one block, so still underfills the GPU, but its direct-event median was only ~1% of candidate update time. The grid-wide occupancy/SM-throughput change and shorter per-thread sum chains support the speedup; no logical `N·K·D` label scans were eliminated, and the relative contribution of those two improvements was not isolated. The candidate is retained. At this checkpoint the unchanged count kernel cost about 3.02 ms on the GPU and 4.62 ms cumulatively over 22 iterative updates, exceeding the new centroid-update cost; this selected the parallel-count experiment completed below.
 
 ### Isolated CUDA experiment — parallel integer cluster counting
 
@@ -277,7 +317,7 @@ Stage B still underfills the GPU. Separate direct Stage-A/Stage-B component medi
 
 Fresh five-fit candidate diagnostic medians (ms) are setup 0.242200, H2D 1.505920, initialization 0.035136, first assignment 0.479200, count 0.020480, centroid update 1.247232, reassignment 0.478208, convergence flag reset/D2H 0.035968, final D2H 0.176000, and device algorithm 2.268288. The one-shot GPU-path sum is 4.010240 ms. Device algorithm excludes flag D2H; one-shot GPU includes it and transfers, but not allocation/validation/teardown. Separate medians do not necessarily add and are not the normal whole-fit denominator. Count is now about 0.9% of device-algorithm time; centroid update and assignment dominate device work.
 
-Ranked remaining opportunities: (1) characterize transfers/residency and native validation/setup/teardown/launch overhead; (2) centroid Stage-A load/stall optimization; (3) assignment optimization. **Exactly one next experiment:** transfer/residency and native host-overhead characterization, because 10.864 ms normal whole-fit versus 2.268 ms device-algorithm diagnostics leaves a larger end-to-end question than further count tuning. This comparison motivates measurement; subtracting independent medians would not precisely attribute that gap. Count/sum fusion is low priority at the measured count share. No next optimization was implemented. Linux, broad size scaling, and general crossover remain unvalidated.
+Ranked remaining opportunities: (1) characterize transfers/residency and native validation/setup/teardown/launch overhead; (2) centroid Stage-A load/stall optimization; (3) assignment optimization. **Selected at this checkpoint (completed below):** transfer/residency and native host-overhead characterization, because 10.864 ms normal whole-fit versus 2.268 ms device-algorithm diagnostics leaves a larger end-to-end question than further count tuning. This comparison motivates measurement; subtracting independent medians would not precisely attribute that gap. Count/sum fusion is low priority at the measured count share. No next optimization was implemented. Linux, broad size scaling, and general crossover remain unvalidated.
 
 Reproduce after the existing Release build with `python -B 03_CUDA_KMeans/python/benchmark_cuda.py PATH_TO_EXE all --compare-count --diagnostic-runs 5`; repeat `primary`, `gpu`, and `iterative` with `--compare-count --diagnostic-runs 0` for confirmation. The driver prints raw runs and correctness evidence. Default and `--compare-tiled` validation remain available; comparison modes are mutually exclusive. Generated inputs, timing outputs, profiler reports, and builds remain ignored.
 
@@ -387,7 +427,7 @@ For GPU, 20-fit wall cost approaches ~3.06 ms/fit, with an uninstrumented fit-me
 
 Requested bytes scale as `4ND + 4KD + 8N + 4K + 4 + 8KD*ceil(N/4096) + 4K*ceil(N/1024)`. This excludes CUDA context/allocator bookkeeping, diagnostic events, host output vectors, and on-chip shared memory. No pinned staging, asynchronous copies, new streams, Python binding, or convergence redesign was introduced.
 
-**Decision at this checkpoint:** rank (1) production-quality explicit persistent native ownership with validation at upload, (2) iterative convergence/launch-overhead investigation, (3) centroid Stage-A kernel tuning. The selected supported-owner milestone is completed below; Python exposure follows it. Do not simply remove checks from the normal API. Pinned transfers are lower priority than avoiding repeated host validation/upload, and no further kernel tuning was performed here.
+**Decision at this checkpoint:** rank (1) production-quality explicit persistent native ownership with validation at upload, (2) iterative convergence/launch-overhead investigation, (3) centroid Stage-A kernel tuning. The selected supported-owner milestone and subsequent Python exposure are completed below. Do not simply remove checks from the normal API. Pinned transfers are lower priority than avoiding repeated host validation/upload, and no further kernel tuning was performed here.
 
 Reproduce with the existing CUDA/OpenMP Release configuration plus `-DPROJECT2_ENABLE_LIFECYCLE_BENCHMARK=ON` in a separate build directory, then run `python -B 03_CUDA_KMeans/python/characterize_cuda_lifecycle.py PATH_TO_phase2_kmeans_cuda_lifecycle.exe fixtures`, `gpu`, and `iterative`. Defaults are seven normal calls and five sequences per R; repeat the two performance commands for confirmation. The driver prints raw JSON and min/median/max summaries. The option is OFF by default and requires CUDA/OpenMP; no new dependency is needed. Generated workloads, raw logs, outputs, and build trees remain ignored. Linux validation and broader crossover remain future work.
 
@@ -660,11 +700,11 @@ Using fresh medians, Project 2 CUDA one-shot is **2.982x / 2.166x / 4.126x faste
 
 The existing residency study remains separate historical evidence; its R20 numbers are not substituted for these fresh timings. This comparison confirms comparable quality and a practical one-shot benefit on the three tested datasets. It does not locate a broad N/D/K crossover, compare default/best scikit-learn threads, or establish general-library superiority.
 
-**Closeout assessment and one next milestone:** native CUDA engineering, Python integration and this controlled CPU-library comparison are complete on tested Windows. Recommend final Project 2 closeout and transition to Project 3 matrix/tensor multiplication, which adds more portfolio breadth than further K-means micro-tuning. Broader scaling is an explicitly deferred optional study, not falsely marked measured. `cuml`/`cuvs` are absent locally; [RAPIDS' Windows route requires WSL2/Linux](https://docs.nvidia.com/datascience/install/#windows-wsl2), so another GPU comparator would entail a separate environment and portability effort. Linux, fault injection and the import-order interaction remain disclosed limitations. No further comparison, optimization or Project 3 implementation was begun here.
+**Comparison checkpoint:** native CUDA engineering, Python integration and this controlled CPU-library comparison were complete on tested Windows. That evidence supported the final closeout recorded above and transition to Project 3, rather than further K-means micro-tuning. Broader scaling is an explicitly deferred optional study, not falsely marked measured. `cuml`/`cuvs` are absent locally; [RAPIDS' Windows route requires WSL2/Linux](https://docs.nvidia.com/datascience/install/#windows-wsl2), so another GPU comparator would entail a separate environment and portability effort. Linux, fault injection and the import-order interaction remain disclosed limitations. No further comparison, optimization or Project 3 implementation was begun here.
 
 ## Planned workflow
 
-Next: final Project 2 closeout and transition to Project 3 matrix/tensor multiplication. Broader scaling and GPU-library feasibility are optional deferred studies, not completed claims or prerequisites for that transition.
+Project 2 closeout is complete. Project 3 proceeds first through contract approval, then reference/fixtures. Broader scaling and GPU-library feasibility are optional deferred studies, not completed claims or prerequisites for that transition.
 
 ## Primary learning goals
 
@@ -702,7 +742,7 @@ The generator uses `numpy.random.Generator(numpy.random.PCG64(seed))`, shuffles 
 
 ## Status
 
-Project 2 implementation and its controlled scikit-learn comparison are complete for the tested Windows scope. The two-feature distance-pipeline experiment was rejected. Final closeout is next; broader independent scaling, GPU-library comparison and Linux validation are explicitly deferred rather than reported complete. This directory retains its original numeric prefix until a separate repository reorganization.
+Project 2 implementation and its controlled scikit-learn comparison are complete for the tested Windows scope. The two-feature distance-pipeline experiment was rejected. Final documentation and repository cleanup are complete; broader independent scaling, GPU-library comparison and Linux validation are explicitly deferred rather than reported complete. This directory retains its original numeric prefix until a separate repository reorganization.
 
 ## Open questions / TBD
 

@@ -6,7 +6,7 @@ Potentially apply the established workflow to a more computationally and memory-
 
 ## Why this project exists
 
-This could raise the difficulty after Project 1 through a larger neighborhood and more demanding high-dimensional memory behavior. For now, Project 1 already supplies substantial median-filter evidence, so general-purpose K-means is the next active portfolio project instead.
+This could raise the difficulty after Project 1 through a larger neighborhood and more demanding high-dimensional memory behavior. Projects 1 and 2 now supply completed median-filter and K-means evidence; the proposed Project 3 dense FP32 GEMM study adds more distinct portfolio value than another median filter.
 
 ## Problem definition
 
